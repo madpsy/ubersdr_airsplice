@@ -7,13 +7,12 @@ services:
       # UberSDR WebSocket URL
       UBERSDR_URL: "ws://ubersdr:8080/ws"
       #
-      # Comma-separated freq:mode pairs to record simultaneously, e.g.:
-      #   UBERSDR_CHANNELS: "7880000:usb,4610000:usb,14300000:usb"
-      UBERSDR_CHANNELS: "7880000:usb,4610000:usb"
+      # Channels are managed via the web UI and persisted to /data/channels.json.
+      # No UBERSDR_CHANNELS env var is needed.
       #
       # Uncomment and set as needed:
       # UBERSDR_PASS: ""
-      # UI_PASSWORD: ""          # Set to enable password-protected delete in the web UI
+      # UI_PASSWORD: ""          # Set to enable password-protected write actions in the web UI
       OUTPUT_DIR: "/data"
       # WEB_PORT: "6095"
       # SEGMENT_SECS: "300"      # Rotate to a new WAV file every N seconds (0 = continuous)

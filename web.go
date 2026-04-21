@@ -12,10 +12,15 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // ---------------------------------------------------------------------------
@@ -192,7 +197,7 @@ func putU16LE(b []byte, v uint16) {
 // startHTTPServer wires all routes and starts listening.
 // ---------------------------------------------------------------------------
 
-func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels []*recChannel, uiPassword string) error {
+func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *channelManager, uiPassword string, rc *retentionConfig, retentionCfgPath string) error {
 	sessions := newSessionStore()
 	mux := http.NewServeMux()
 
@@ -305,6 +310,576 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 	mux.Handle("/recordings/", http.StripPrefix("/recordings/", http.FileServer(http.Dir(store.outputDir))))
 
 	// -----------------------------------------------------------------------
+	// GET  /api/channels        — list all channels and their status
+	// POST /api/channels        — add a new channel (auth required)
+	//                             body: {"freq_hz": 7880000, "mode": "usb"}
+	// DELETE /api/channels/{label} — remove a channel (auth required)
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/channels", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			channels := mgr.list()
+			var out []map[string]interface{}
+			for _, ch := range channels {
+				out = append(out, ch.statusSnapshot())
+			}
+			writeJSON(w, out)
+
+		case http.MethodPost:
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			var body struct {
+				FreqHz      int               `json:"freq_hz"`
+				Mode        string            `json:"mode"`
+				Name        string            `json:"name"`         // optional user-defined label
+				SmartRecord SmartRecordConfig `json:"smart_record"` // optional VOX gate config
+				Schedule    ScheduleConfig    `json:"schedule"`     // optional time-based schedule
+				BandwidthHz int               `json:"bandwidth_hz"` // optional filter bandwidth
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			if body.FreqHz <= 0 {
+				http.Error(w, `{"error":"freq_hz required"}`, http.StatusBadRequest)
+				return
+			}
+			if body.Mode == "" {
+				http.Error(w, `{"error":"mode required"}`, http.StatusBadRequest)
+				return
+			}
+			if body.Schedule.Enabled {
+				if errMsg := body.Schedule.Validate(); errMsg != "" {
+					http.Error(w, fmt.Sprintf(`{"error":"schedule: %s"}`, errMsg), http.StatusBadRequest)
+					return
+				}
+			}
+			ch, err := mgr.add(body.FreqHz, body.Mode, body.Name, "", body.SmartRecord, body.Schedule, body.BandwidthHz)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusConflict)
+				return
+			}
+			mgr.save()
+			hub.broadcast(sseEvent{
+				Event: "channel_added",
+				Data:  map[string]interface{}{"label": ch.label, "freq_hz": body.FreqHz, "mode": body.Mode},
+			})
+			writeJSON(w, ch.statusSnapshot())
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/channels/", func(w http.ResponseWriter, r *http.Request) {
+		label := strings.TrimPrefix(r.URL.Path, "/api/channels/")
+		if label == "" {
+			http.Error(w, "missing label", http.StatusBadRequest)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodDelete:
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			if err := mgr.remove(label); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			mgr.save()
+			hub.broadcast(sseEvent{
+				Event: "channel_removed",
+				Data:  map[string]string{"label": label},
+			})
+			writeJSON(w, map[string]string{"status": "removed", "label": label})
+
+		case http.MethodPatch:
+			// PATCH /api/channels/{label} — rename, update smart-record config, schedule, and/or bandwidth.
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			var body struct {
+				Name        *string            `json:"name"`
+				SmartRecord *SmartRecordConfig `json:"smart_record"`
+				Schedule    *ScheduleConfig    `json:"schedule"`
+				BandwidthHz *int               `json:"bandwidth_hz"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+				return
+			}
+			if body.Name == nil && body.SmartRecord == nil && body.Schedule == nil && body.BandwidthHz == nil {
+				http.Error(w, `{"error":"name, smart_record, schedule, or bandwidth_hz required"}`, http.StatusBadRequest)
+				return
+			}
+
+			// Apply rename if requested.
+			newLabel := label
+			if body.Name != nil && *body.Name != "" {
+				var err error
+				newLabel, err = mgr.rename(label, *body.Name)
+				if err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusConflict)
+					return
+				}
+				hub.broadcast(sseEvent{
+					Event: "channel_renamed",
+					Data:  map[string]string{"old_label": label, "new_label": newLabel},
+				})
+			}
+
+			// Apply smart-record config if provided.
+			if body.SmartRecord != nil {
+				if err := mgr.setSmartRecord(newLabel, *body.SmartRecord); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+					return
+				}
+				hub.broadcast(sseEvent{
+					Event: "channel_updated",
+					Data:  map[string]interface{}{"label": newLabel, "smart_record": *body.SmartRecord},
+				})
+			}
+
+			// Apply schedule if provided.
+			if body.Schedule != nil {
+				if body.Schedule.Enabled {
+					if errMsg := body.Schedule.Validate(); errMsg != "" {
+						http.Error(w, fmt.Sprintf(`{"error":"schedule: %s"}`, errMsg), http.StatusBadRequest)
+						return
+					}
+				}
+				if err := mgr.setSchedule(newLabel, *body.Schedule); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+					return
+				}
+				hub.broadcast(sseEvent{
+					Event: "channel_updated",
+					Data:  map[string]interface{}{"label": newLabel, "schedule": *body.Schedule},
+				})
+			}
+
+			// Apply bandwidth if provided.
+			if body.BandwidthHz != nil {
+				if err := mgr.setBandwidth(newLabel, *body.BandwidthHz); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+					return
+				}
+				hub.broadcast(sseEvent{
+					Event: "channel_updated",
+					Data:  map[string]interface{}{"label": newLabel, "bandwidth_hz": *body.BandwidthHz},
+				})
+			}
+
+			mgr.save()
+			writeJSON(w, map[string]string{"status": "ok", "label": newLabel})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// GET /api/active — list all currently-recording (in-progress) segments
+	// GET /api/active/{label}/stream — serve the partially-written WAV so far
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/active", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var active []*activeSegmentInfo
+		for _, ch := range mgr.list() {
+			if snap := ch.liveSnapshot(); snap != nil {
+				active = append(active, snap)
+			}
+		}
+		writeJSON(w, active)
+	})
+
+	mux.HandleFunc("/api/active/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Path: /api/active/{label}/stream
+		rest := strings.TrimPrefix(r.URL.Path, "/api/active/")
+		parts := strings.SplitN(rest, "/", 2)
+		label := parts[0]
+		action := ""
+		if len(parts) == 2 {
+			action = parts[1]
+		}
+		if label == "" || action != "stream" {
+			http.Error(w, "use /api/active/{label}/stream", http.StatusBadRequest)
+			return
+		}
+
+		// Find the channel.
+		var snap *activeSegmentInfo
+		for _, ch := range mgr.list() {
+			if ch.label == label {
+				snap = ch.liveSnapshot()
+				break
+			}
+		}
+		if snap == nil {
+			http.Error(w, "channel not found or not recording", http.StatusNotFound)
+			return
+		}
+
+		// Open the WAV file for reading (the recorder is writing to it concurrently).
+		f, err := os.Open(snap.Path)
+		if err != nil {
+			http.Error(w, "cannot open recording: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer f.Close()
+
+		// Write a corrected WAV header with the bytes written so far, then stream the PCM.
+		writeStreamingWAVHeader(w, snap.SampleRate, snap.Channels)
+		flusher, _ := w.(http.Flusher)
+
+		// Skip the 44-byte placeholder header in the file.
+		if _, err := f.Seek(44, 0); err != nil {
+			return
+		}
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := f.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// GET /api/sessions?label=&limit=20&offset=0
+	//     Returns sessions (groups of segments) newest-first.
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		label := q.Get("label")
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if limit <= 0 {
+			limit = 20
+		}
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		groupByChannel := q.Get("group_by") == "channel"
+		var sessions2 []*sessionSummary
+		var total int
+		if groupByChannel {
+			sessions2, total = store.listByChannelID(label, limit, offset)
+		} else {
+			sessions2, total = store.listSessions(label, limit, offset)
+		}
+		writeJSON(w, map[string]interface{}{
+			"sessions": sessions2,
+			"total":    total,
+			"limit":    limit,
+			"offset":   offset,
+		})
+	})
+
+	// -----------------------------------------------------------------------
+	// GET /api/sessions/{id}/stream  — concatenated WAV stream for a session
+	// GET /api/sessions/{id}         — session metadata JSON
+	// DELETE /api/sessions/{id}      — delete all segments in a session (auth)
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		// Path: /api/sessions/{id}  or  /api/sessions/{id}/stream
+		rest := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+		parts := strings.SplitN(rest, "/", 2)
+		sessionID := parts[0]
+		action := ""
+		if len(parts) == 2 {
+			action = parts[1]
+		}
+		if sessionID == "" {
+			http.Error(w, "missing session id", http.StatusBadRequest)
+			return
+		}
+
+		ss := store.getSession(sessionID)
+
+		// For telemetry on a live (not-yet-stored) session, fall back to the
+		// active channel whose session_id matches.
+		if ss == nil && action == "telemetry" {
+			for _, ch := range mgr.list() {
+				snap := ch.liveSnapshot()
+				if snap == nil || snap.SessionID != sessionID {
+					continue
+				}
+				// Build a minimal telemetry response from the in-progress .jsonl
+				type telPoint struct {
+					T         string   `json:"t"`
+					SNR       SNRStats `json:"snr"`
+					LevelDB   float32  `json:"level_dbfs"`
+					SegIdx    int      `json:"seg_idx"`
+					OffsetSec float64  `json:"offset_sec"`
+				}
+				var points []telPoint
+				if snap.JsonlPath != "" {
+					data, err := os.ReadFile(snap.JsonlPath)
+					if err == nil {
+						for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+							if line == "" {
+								continue
+							}
+							var entry struct {
+								T         string   `json:"t"`
+								SNR       SNRStats `json:"snr"`
+								LevelDBFS float32  `json:"level_dbfs"`
+							}
+							if err := json.Unmarshal([]byte(line), &entry); err != nil {
+								continue
+							}
+							t, err := time.Parse(time.RFC3339, entry.T)
+							if err != nil {
+								continue
+							}
+							points = append(points, telPoint{
+								T:         entry.T,
+								SNR:       entry.SNR,
+								LevelDB:   entry.LevelDBFS,
+								SegIdx:    snap.SegmentIndex,
+								OffsetSec: t.Sub(snap.StartedAt).Seconds(),
+							})
+						}
+					}
+				}
+				writeJSON(w, map[string]interface{}{
+					"session_id":   sessionID,
+					"started_at":   snap.StartedAt,
+					"duration_sec": snap.DurationSec,
+					"points":       points,
+				})
+				return
+			}
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+
+		if ss == nil {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+
+		switch {
+		case r.Method == http.MethodGet && action == "stream":
+			// Stream all segments as a single concatenated WAV.
+			if len(ss.Segments) == 0 {
+				http.Error(w, "no segments", http.StatusNotFound)
+				return
+			}
+			first := ss.Segments[0]
+			writeStreamingWAVHeader(w, first.SampleRate, first.Channels)
+			flusher, _ := w.(http.Flusher)
+			for _, seg := range ss.Segments {
+				path := filepath.Join(store.outputDir, seg.Filename)
+				f, err := os.Open(path)
+				if err != nil {
+					log.Printf("[web] session stream: open %s: %v", path, err)
+					continue
+				}
+				// Skip the 44-byte WAV header.
+				if _, err := f.Seek(44, 0); err != nil {
+					f.Close()
+					continue
+				}
+				buf := make([]byte, 32*1024)
+				for {
+					n, err := f.Read(buf)
+					if n > 0 {
+						if _, werr := w.Write(buf[:n]); werr != nil {
+							f.Close()
+							return
+						}
+						if flusher != nil {
+							flusher.Flush()
+						}
+					}
+					if err != nil {
+						break
+					}
+				}
+				f.Close()
+				select {
+				case <-r.Context().Done():
+					return
+				default:
+				}
+			}
+
+		case r.Method == http.MethodGet && action == "telemetry":
+			// Read all .jsonl telemetry files for this session's segments and
+			// return a merged, time-ordered array of SNR/level data points.
+			type telPoint struct {
+				T         string   `json:"t"`
+				SNR       SNRStats `json:"snr"`
+				LevelDB   float32  `json:"level_dbfs"`
+				SegIdx    int      `json:"seg_idx"`
+				OffsetSec float64  `json:"offset_sec"` // seconds from session start
+			}
+			sessStart := ss.StartedAt
+			var points []telPoint
+			for _, seg := range ss.Segments {
+				base := strings.TrimSuffix(seg.Filename, filepath.Ext(seg.Filename))
+				jsonlPath := filepath.Join(store.outputDir, base+".jsonl")
+				data, err := os.ReadFile(jsonlPath)
+
+				segPoints := 0
+				if err == nil {
+					for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+						if line == "" {
+							continue
+						}
+						var entry struct {
+							T         string   `json:"t"`
+							SNR       SNRStats `json:"snr"`
+							LevelDBFS float32  `json:"level_dbfs"`
+						}
+						if err := json.Unmarshal([]byte(line), &entry); err != nil {
+							continue
+						}
+						t, err := time.Parse(time.RFC3339, entry.T)
+						if err != nil {
+							continue
+						}
+						points = append(points, telPoint{
+							T:         entry.T,
+							SNR:       entry.SNR,
+							LevelDB:   entry.LevelDBFS,
+							SegIdx:    seg.SegmentIndex,
+							OffsetSec: t.Sub(sessStart).Seconds(),
+						})
+						segPoints++
+					}
+				}
+
+				// If no .jsonl data exists for this segment (short segment, crash, etc.)
+				// synthesise a single point from the segment's own SNR at its midpoint.
+				if segPoints == 0 && seg.SNR.Count > 0 {
+					midOffset := seg.StartedAt.Sub(sessStart).Seconds() + seg.DurationSec/2
+					points = append(points, telPoint{
+						T:         seg.StartedAt.UTC().Format(time.RFC3339),
+						SNR:       seg.SNR,
+						LevelDB:   float32(seg.SNR.BasebandAvg),
+						SegIdx:    seg.SegmentIndex,
+						OffsetSec: midOffset,
+					})
+				}
+			}
+			// Also append telemetry from the currently-recording (live) segment
+			// for this channel, if any. The live segment is not yet in the store.
+			for _, ch := range mgr.list() {
+				snap := ch.liveSnapshot()
+				if snap == nil || snap.ChannelID != sessionID {
+					continue
+				}
+				if snap.JsonlPath == "" {
+					break
+				}
+				data, err := os.ReadFile(snap.JsonlPath)
+				if err != nil {
+					break
+				}
+				for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+					if line == "" {
+						continue
+					}
+					var entry struct {
+						T         string   `json:"t"`
+						SNR       SNRStats `json:"snr"`
+						LevelDBFS float32  `json:"level_dbfs"`
+					}
+					if err := json.Unmarshal([]byte(line), &entry); err != nil {
+						continue
+					}
+					t, err := time.Parse(time.RFC3339, entry.T)
+					if err != nil {
+						continue
+					}
+					points = append(points, telPoint{
+						T:         entry.T,
+						SNR:       entry.SNR,
+						LevelDB:   entry.LevelDBFS,
+						SegIdx:    snap.SegmentIndex,
+						OffsetSec: t.Sub(sessStart).Seconds(),
+					})
+				}
+				break
+			}
+
+			// Sort by time offset
+			sort.Slice(points, func(i, j int) bool {
+				return points[i].OffsetSec < points[j].OffsetSec
+			})
+			// Total duration = wall-clock span including live segment.
+			// Add one telemetry interval (10 s) of padding so the last bar
+			// has visible width on the canvas.
+			totalDur := ss.DurationSec
+			if len(points) > 0 {
+				lastOff := points[len(points)-1].OffsetSec + 10
+				if lastOff > totalDur {
+					totalDur = lastOff
+				}
+			}
+			writeJSON(w, map[string]interface{}{
+				"session_id":   sessionID,
+				"started_at":   ss.StartedAt,
+				"duration_sec": totalDur,
+				"points":       points,
+			})
+
+		case r.Method == http.MethodGet && action == "":
+			writeJSON(w, ss)
+
+		case r.Method == http.MethodDelete && action == "":
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			// Delete all segments in the session.
+			var deleteErrs []string
+			for _, seg := range ss.Segments {
+				if err := store.delete(seg.ID); err != nil {
+					deleteErrs = append(deleteErrs, err.Error())
+				} else {
+					hub.broadcast(sseEvent{
+						Event: "recording_deleted",
+						Data:  map[string]string{"id": seg.ID},
+					})
+				}
+			}
+			if len(deleteErrs) > 0 {
+				http.Error(w, strings.Join(deleteErrs, "; "), http.StatusInternalServerError)
+				return
+			}
+			hub.broadcast(sseEvent{
+				Event: "session_deleted",
+				Data:  map[string]string{"session_id": sessionID},
+			})
+			writeJSON(w, map[string]string{"status": "deleted", "session_id": sessionID})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// -----------------------------------------------------------------------
 	// GET /api/recordings?label=&limit=50&offset=0
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/recordings", func(w http.ResponseWriter, r *http.Request) {
@@ -359,22 +934,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 	})
 
 	// -----------------------------------------------------------------------
-	// GET /api/channels — list all configured channels and their status
-	// -----------------------------------------------------------------------
-	mux.HandleFunc("/api/channels", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var out []map[string]interface{}
-		for _, ch := range channels {
-			out = append(out, ch.statusSnapshot())
-		}
-		writeJSON(w, out)
-	})
-
-	// -----------------------------------------------------------------------
-	// GET /api/live — SSE stream of recording_started / recording_saved / recording_deleted
+	// GET /api/live — SSE stream of events
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/live", func(w http.ResponseWriter, r *http.Request) {
 		label := r.URL.Query().Get("label")
@@ -431,7 +991,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 
 		label := r.URL.Query().Get("label")
 		var inst *instance
-		for _, ch := range channels {
+		for _, ch := range mgr.list() {
 			if ch.label == label {
 				inst = ch.inst
 				break
@@ -480,7 +1040,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 	mux.HandleFunc("/api/audio/preview", func(w http.ResponseWriter, r *http.Request) {
 		label := r.URL.Query().Get("label")
 		var inst *instance
-		for _, ch := range channels {
+		for _, ch := range mgr.list() {
 			if ch.label == label {
 				inst = ch.inst
 				break
@@ -526,6 +1086,137 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 	})
 
 	// -----------------------------------------------------------------------
+	// GET /api/live/{label}/ws — real-time WebSocket audio stream
+	//
+	// Protocol:
+	//   1. Server sends a JSON text frame: {"sample_rate":8000,"channels":1}
+	//   2. Server sends binary frames: raw S16LE mono PCM chunks (no header)
+	//   3. Client closes the connection to stop.
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/live/", func(w http.ResponseWriter, r *http.Request) {
+		// Path: /api/live/{label}/ws
+		rest := strings.TrimPrefix(r.URL.Path, "/api/live/")
+		parts := strings.SplitN(rest, "/", 2)
+		label := parts[0]
+		action := ""
+		if len(parts) == 2 {
+			action = parts[1]
+		}
+		if label == "" || action != "ws" {
+			http.Error(w, "use /api/live/{label}/ws", http.StatusBadRequest)
+			return
+		}
+
+		var inst *instance
+		for _, ch := range mgr.list() {
+			if ch.label == label {
+				inst = ch.inst
+				break
+			}
+		}
+		if inst == nil {
+			http.Error(w, "channel not found", http.StatusNotFound)
+			return
+		}
+
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("[live-ws] upgrade %s: %v", label, err)
+			return
+		}
+		defer conn.Close()
+
+		// Send stream info as first text frame.
+		inst.streamMu.RLock()
+		sr := inst.streamSampleRate
+		inst.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 8000
+		}
+		info, _ := json.Marshal(map[string]int{"sample_rate": sr, "channels": 1})
+		if err := conn.WriteMessage(websocket.TextMessage, info); err != nil {
+			return
+		}
+
+		audioCh := inst.audioHub.subscribe()
+		defer inst.audioHub.unsubscribe(audioCh)
+
+		// Drain incoming messages (client pings / close frames) in background.
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case chunk, ok := <-audioCh:
+				if !ok {
+					return
+				}
+				if err := conn.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
+					return
+				}
+			}
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// GET /api/snr/all — SSE stream of SNR for ALL channels (every 200 ms)
+	// Sends: event: snr\ndata: [{"label":"...","snr":{...}}, ...]\n\n
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/snr/all", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, ": connected\n\n")
+		flusher.Flush()
+
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		type snrEntry struct {
+			Label string   `json:"label"`
+			SNR   SNRStats `json:"snr"`
+		}
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				channels := mgr.list()
+				entries := make([]snrEntry, 0, len(channels))
+				for _, ch := range channels {
+					entries = append(entries, snrEntry{
+						Label: ch.label,
+						SNR:   ch.inst.snrAccum.peekLatest(2),
+					})
+				}
+				data, err := json.Marshal(entries)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "event: snr\ndata: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
+	})
+
+	// -----------------------------------------------------------------------
 	// GET /api/snr?label= — SSE stream of SNR stats (every 500 ms)
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/snr", func(w http.ResponseWriter, r *http.Request) {
@@ -537,7 +1228,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 
 		label := r.URL.Query().Get("label")
 		var inst *instance
-		for _, ch := range channels {
+		for _, ch := range mgr.list() {
 			if ch.label == label {
 				inst = ch.inst
 				break
@@ -576,6 +1267,89 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 	})
 
 	// -----------------------------------------------------------------------
+	// GET  /api/retention          — read current retention settings
+	// POST /api/retention          — update retention settings (auth-gated)
+	//
+	// GET response:  {"default_hours":0,"channels":{"7880000_usb":48}}
+	// POST body:     {"default_hours":0,"channels":{"7880000_usb":48}}
+	//   OR per-channel shorthand: {"label":"7880000_usb","keep_hours":48}
+	//
+	// keep_hours / default_hours == 0 means keep forever.
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/retention", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			defH, chMap := rc.snapshot()
+			writeJSON(w, map[string]interface{}{
+				"default_hours": defH,
+				"channels":      chMap,
+			})
+
+		case http.MethodPost:
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			// Accept two shapes:
+			//   {"label":"...", "keep_hours": N}  — set one channel
+			//   {"default_hours": N, "channels": {...}}  — bulk update
+			var raw map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				http.Error(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			if labelRaw, ok := raw["label"]; ok {
+				// Per-channel shorthand
+				var label string
+				var hours int
+				if err := json.Unmarshal(labelRaw, &label); err != nil {
+					http.Error(w, "invalid label", http.StatusBadRequest)
+					return
+				}
+				if h, ok := raw["keep_hours"]; ok {
+					if err := json.Unmarshal(h, &hours); err != nil {
+						http.Error(w, "invalid keep_hours", http.StatusBadRequest)
+						return
+					}
+				}
+				if hours < 0 {
+					http.Error(w, "keep_hours must be >= 0", http.StatusBadRequest)
+					return
+				}
+				rc.setForLabel(label, hours)
+				log.Printf("[retention] %s: keep_hours=%d", label, hours)
+			} else {
+				// Bulk update
+				if h, ok := raw["default_hours"]; ok {
+					var defH int
+					if err := json.Unmarshal(h, &defH); err == nil && defH >= 0 {
+						rc.setDefault(defH)
+					}
+				}
+				if ch, ok := raw["channels"]; ok {
+					var chMap map[string]int
+					if err := json.Unmarshal(ch, &chMap); err == nil {
+						for label, hours := range chMap {
+							if hours >= 0 {
+								rc.setForLabel(label, hours)
+							}
+						}
+					}
+				}
+				log.Printf("[retention] bulk update applied")
+			}
+			rc.save(retentionCfgPath)
+			defH, chMap := rc.snapshot()
+			writeJSON(w, map[string]interface{}{
+				"default_hours": defH,
+				"channels":      chMap,
+			})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// -----------------------------------------------------------------------
 	// GET /api/status — overall server status
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -583,6 +1357,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, channels [
 		total := len(store.records)
 		store.mu.RUnlock()
 
+		channels := mgr.list()
 		var chStatus []map[string]interface{}
 		for _, ch := range channels {
 			chStatus = append(chStatus, ch.statusSnapshot())

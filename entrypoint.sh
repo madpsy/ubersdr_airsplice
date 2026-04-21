@@ -3,13 +3,15 @@
 #
 # Environment variables:
 #   UBERSDR_URL       UberSDR WebSocket URL (default: ws://ubersdr:8080/ws)
-#   UBERSDR_CHANNELS  Comma-separated freq:mode pairs, e.g. 7880000:usb,14300000:usb
 #   UBERSDR_PASS      UberSDR bypass password (optional)
 #   OUTPUT_DIR        Output directory for recordings (default: /data)
 #   WEB_PORT          Port for the web UI server (default: 6095)
 #   SEGMENT_SECS      Rotate to a new WAV file every N seconds; 0 = continuous (default: 300)
 #   CLEANUP_ALL_DAYS  Delete ALL recordings older than N days; 0 = disabled (default: 30)
 #   UI_PASSWORD       Password for write actions in the web UI (optional)
+#
+# Channels are persisted in $OUTPUT_DIR/channels.json and managed via the web UI.
+# No UBERSDR_CHANNELS env var is needed.
 
 set -e
 
@@ -30,17 +32,6 @@ if [ -n "$WEB_PORT" ]; then
     args="$args -listen :$WEB_PORT"
 else
     args="$args -listen :6095"
-fi
-
-# UBERSDR_CHANNELS is a comma-separated list; expand each entry as a -channel flag
-if [ -n "$UBERSDR_CHANNELS" ]; then
-    old_ifs="$IFS"
-    IFS=","
-    for ch in $UBERSDR_CHANNELS; do
-        ch="$(echo "$ch" | tr -d ' ')"
-        [ -n "$ch" ] && args="$args -channel $ch"
-    done
-    IFS="$old_ifs"
 fi
 
 # Append any CLI args passed directly to the container

@@ -169,7 +169,7 @@ func (a *snrAccumulator) drain() SNRStats {
 	return s
 }
 
-// peek returns stats without resetting.
+// peek returns stats without resetting (averaged over all accumulated samples).
 func (a *snrAccumulator) peek() SNRStats {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -202,6 +202,48 @@ func (a *snrAccumulator) peek() SNRStats {
 	}
 	s.Sanitise()
 	return s
+}
+
+// peekLatest returns stats for only the most recent N samples (up to last ~2s
+// at 100ms packet rate = ~20 samples), giving a near-instantaneous reading
+// suitable for real-time display. Does not reset the accumulator.
+func (a *snrAccumulator) peekLatest(window int) SNRStats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := len(a.samples)
+	if n == 0 {
+		return SNRStats{}
+	}
+	start := n - window
+	if start < 0 {
+		start = 0
+	}
+	slice := a.samples[start:]
+	var sumSNR, sumBB, sumN float32
+	minSNR := float32(math.MaxFloat32)
+	maxSNR := float32(-math.MaxFloat32)
+	for _, s := range slice {
+		sumSNR += s.snrDB
+		sumBB += s.bb
+		sumN += s.noise
+		if s.snrDB < minSNR {
+			minSNR = s.snrDB
+		}
+		if s.snrDB > maxSNR {
+			maxSNR = s.snrDB
+		}
+	}
+	fn := float32(len(slice))
+	st := SNRStats{
+		Count:       len(slice),
+		AvgDB:       sumSNR / fn,
+		MinDB:       minSNR,
+		MaxDB:       maxSNR,
+		BasebandAvg: sumBB / fn,
+		NoiseAvg:    sumN / fn,
+	}
+	st.Sanitise()
+	return st
 }
 
 // ---------------------------------------------------------------------------
@@ -343,10 +385,11 @@ func (h *audioBroadcastHub) hasListeners() bool {
 // ---------------------------------------------------------------------------
 
 type instance struct {
-	freqHz    int // tuned frequency in Hz
-	carrierHz int // carrier offset (0 for direct tuning)
-	audioMode string
-	label     string // e.g. "14230000_usb"
+	freqHz      int // tuned frequency in Hz
+	carrierHz   int // carrier offset (0 for direct tuning)
+	audioMode   string
+	label       string // e.g. "14230000_usb"
+	bandwidthHz int    // filter bandwidth in Hz; 0 = server default
 
 	ubersdrURL string
 	password   string
@@ -373,8 +416,11 @@ type instance struct {
 	AudioCh chan []byte
 }
 
-func newInstance(freqHz, carrierHz int, audioMode, ubersdrURL, password string) *instance {
-	label := fmt.Sprintf("%d_%s", freqHz, audioMode)
+func newInstance(freqHz, carrierHz int, audioMode, ubersdrURL, password, labelOverride string, bandwidthHz int) *instance {
+	label := labelOverride
+	if label == "" {
+		label = fmt.Sprintf("%d_%s", freqHz, audioMode)
+	}
 	dialHz := freqHz - carrierHz
 	if carrierHz != 0 {
 		log.Printf("[%s] published freq %d Hz, carrier offset %d Hz → dial freq %d Hz (%s)",
@@ -383,19 +429,34 @@ func newInstance(freqHz, carrierHz int, audioMode, ubersdrURL, password string) 
 		log.Printf("[%s] freq %d Hz (%s)", label, freqHz, audioMode)
 	}
 	return &instance{
-		freqHz:     freqHz,
-		carrierHz:  carrierHz,
-		audioMode:  audioMode,
-		label:      label,
-		ubersdrURL: ubersdrURL,
-		password:   password,
-		sessionID:  uuid.New().String(),
-		audioHub:   newAudioBroadcastHub(),
-		fftHub:     newFFTBroadcastHub(),
-		snrAccum:   &snrAccumulator{},
-		status:     "stopped",
-		AudioCh:    make(chan []byte, 256),
+		freqHz:      freqHz,
+		carrierHz:   carrierHz,
+		audioMode:   audioMode,
+		label:       label,
+		bandwidthHz: bandwidthHz,
+		ubersdrURL:  ubersdrURL,
+		password:    password,
+		sessionID:   uuid.New().String(),
+		audioHub:    newAudioBroadcastHub(),
+		fftHub:      newFFTBroadcastHub(),
+		snrAccum:    &snrAccumulator{},
+		status:      "stopped",
+		AudioCh:     make(chan []byte, 256),
 	}
+}
+
+// setBandwidth updates the filter bandwidth. Takes effect on next reconnect.
+func (inst *instance) setBandwidth(hz int) {
+	inst.mu.Lock()
+	inst.bandwidthHz = hz
+	inst.mu.Unlock()
+}
+
+// getBandwidth returns the current filter bandwidth setting.
+func (inst *instance) getBandwidth() int {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return inst.bandwidthHz
 }
 
 // DrainSNR returns accumulated SNR stats since the last call and resets the accumulator.
@@ -420,6 +481,46 @@ func (inst *instance) httpBase() string {
 	return fmt.Sprintf("%s://%s", scheme, u.Host)
 }
 
+// bandwidthParams returns the bandwidthLow and bandwidthHigh values (in Hz)
+// for the given mode and bandwidth setting.
+//
+// UberSDR convention:
+//   - USB: both values positive  (low=+300, high=+bwHz)
+//   - LSB: both values negative  (low=-bwHz, high=-300)
+//   - AM/FM/NFM/SAM/CW: symmetric (low=-half, high=+half)
+func bandwidthParams(mode string, bwHz int) (low, high int) {
+	if bwHz <= 0 {
+		return 0, 0 // 0 means "don't send" — server uses its default
+	}
+	switch strings.ToLower(mode) {
+	case "usb":
+		// Passband: +300 Hz to +bwHz (lower edge fixed at 300 Hz)
+		low = 300
+		high = bwHz
+		if high < low {
+			high = low + 1
+		}
+	case "lsb":
+		// Mirror of USB: passband -bwHz to -300 Hz
+		low = -bwHz
+		high = -300
+		if low > high {
+			low = high - 1
+		}
+	case "cw":
+		// Symmetric narrow filter
+		half := bwHz / 2
+		low = -half
+		high = half
+	default:
+		// AM, FM, NFM, SAM — symmetric
+		half := bwHz / 2
+		low = -half
+		high = half
+	}
+	return low, high
+}
+
 func (inst *instance) wsURL() string {
 	u, _ := url.Parse(inst.ubersdrURL)
 	wsScheme := "ws"
@@ -439,6 +540,15 @@ func (inst *instance) wsURL() string {
 	q.Set("user_session_id", inst.sessionID)
 	if inst.password != "" {
 		q.Set("password", inst.password)
+	}
+	// Send bandwidth parameters when a non-default value is configured.
+	inst.mu.Lock()
+	bwHz := inst.bandwidthHz
+	inst.mu.Unlock()
+	if bwHz > 0 {
+		low, high := bandwidthParams(inst.audioMode, bwHz)
+		q.Set("bandwidthLow", fmt.Sprintf("%d", low))
+		q.Set("bandwidthHigh", fmt.Sprintf("%d", high))
 	}
 	return fmt.Sprintf("%s://%s%s?%s", wsScheme, u.Host, path, q.Encode())
 }
@@ -544,7 +654,6 @@ func (inst *instance) runOnce(ctx context.Context) (reconnect bool) {
 	var totalPackets atomic.Int64
 
 	firstPacket := true
-	nanSigInfoLogged := false
 	var instFFT *audioFFT // lazily created once sample rate is known
 
 	inst.mu.Lock()
@@ -594,17 +703,11 @@ func (inst *instance) runOnce(ctx context.Context) (reconnect bool) {
 			}
 
 			// Accumulate SNR from v2 full-header packets.
+			// snrAccum.add() already silently drops NaN/Inf values, so just
+			// feed every packet — the server may send NaN on early packets
+			// before the demodulator has a valid measurement.
 			if pkt.hasSigInfo {
-				bb, ns := pkt.basebandDBFS, pkt.noiseDBFS
-				if math.IsNaN(float64(bb)) || math.IsNaN(float64(ns)) ||
-					math.IsInf(float64(bb), 0) || math.IsInf(float64(ns), 0) {
-					if !nanSigInfoLogged {
-						log.Printf("[%s] v2 packet has NaN/Inf signal-quality fields — SNR will not be recorded", inst.label)
-						nanSigInfoLogged = true
-					}
-				} else {
-					inst.snrAccum.add(bb, ns)
-				}
+				inst.snrAccum.add(pkt.basebandDBFS, pkt.noiseDBFS)
 			}
 
 			// Downmix stereo (wfm) to mono
@@ -749,6 +852,7 @@ func (inst *instance) statusSnapshot() map[string]interface{} {
 	sr := inst.streamSampleRate
 	ch := inst.streamChannels
 	inst.streamMu.RUnlock()
+	snr := inst.snrAccum.peek()
 	return map[string]interface{}{
 		"freq_hz":       inst.freqHz,
 		"audio_mode":    inst.audioMode,
@@ -758,5 +862,7 @@ func (inst *instance) statusSnapshot() map[string]interface{} {
 		"reconnections": inst.reconnections,
 		"sample_rate":   sr,
 		"channels":      ch,
+		"snr":           snr,
+		"bandwidth_hz":  inst.bandwidthHz,
 	}
 }

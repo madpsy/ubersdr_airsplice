@@ -54,6 +54,75 @@ section { margin-bottom: 40px; }
 section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transform: uppercase;
              letter-spacing: 0.08em; margin-bottom: 16px; }
 
+/* ── Section header (title + action button) ── */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.section-header h2 { margin-bottom: 0; }
+.section-header button {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 3px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.section-header button:hover { background: var(--accent); color: #fff; }
+
+/* ── Add-channel panel ── */
+.add-channel-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.add-channel-panel h3 { font-size: 0.9rem; font-weight: 600; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.add-channel-fields {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.add-channel-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.add-channel-fields input,
+.add-channel-fields select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  min-width: 140px;
+}
+.add-channel-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.add-channel-actions button {
+  padding: 6px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}
+.add-channel-actions button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
+.add-channel-actions button:first-child:hover { opacity: 0.85; }
+.add-channel-actions button:last-child:hover { border-color: var(--danger); color: var(--danger); }
+
 /* ── Channels grid ── */
 #channels-grid {
   display: grid;
@@ -68,9 +137,70 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   padding: 14px 16px;
 }
 
-.channel-card .ch-label { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
+.ch-label-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: nowrap; }
+.channel-card .ch-label { font-weight: 600; font-size: 0.95rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-card .ch-freq-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
 .channel-card .ch-freq  { color: var(--accent); font-size: 0.85rem; }
 .channel-card .ch-mode  { color: var(--muted); font-size: 0.8rem; }
+.channel-card .ch-bw    {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.rename-ch-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.rename-ch-btn:hover { color: var(--accent); background: rgba(79,142,247,0.1); }
+
+.ch-rename-form {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.ch-rename-form.hidden { display: none; }
+.ch-rename-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 0.85rem;
+}
+.ch-rename-input:focus { outline: none; border-color: var(--accent); }
+.ch-rename-save, .ch-rename-cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ch-rename-save  { color: #4caf50; border-color: #4caf50; }
+.ch-rename-cancel { color: #e53935; border-color: #e53935; }
+.ch-rename-save:hover  { background: rgba(76,175,80,0.15); }
+.ch-rename-cancel:hover { background: rgba(229,57,53,0.15); }
 
 .ch-status {
   display: inline-block;
@@ -83,9 +213,31 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .ch-status.running      { background: #14532d; color: var(--accent2); }
 .ch-status.reconnecting { background: #422006; color: #fb923c; }
 .ch-status.stopped      { background: #1e1e2e; color: var(--muted); }
+.ch-status.running      { background: #1e1e2e; color: var(--muted); }
+.ch-status.arming       { background: #2d2a10; color: #f5c542; }
 .ch-status.recording    { background: #1e3a5f; color: var(--accent); }
+.ch-status.tail         { background: #2a1a10; color: #fb923c; }
 
 .ch-snr { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+
+.ch-retention-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.ch-retention-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 6px;
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.ch-retention-select:hover { border-color: var(--accent); }
 
 .ch-actions { margin-top: 10px; display: flex; gap: 6px; }
 .ch-actions button {
@@ -99,6 +251,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   font-size: 0.75rem;
 }
 .ch-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.ch-actions button.remove-ch-btn:hover { border-color: var(--danger); color: var(--danger); }
 
 /* ── Filter bar ── */
 #filter-bar {
@@ -131,29 +284,45 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 }
 #refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* ── Recordings list ── */
-#recordings-list { display: flex; flex-direction: column; gap: 8px; }
+/* ── Sessions / Recordings list ── */
+#recordings-list { display: flex; flex-direction: column; gap: 10px; }
 
-.rec-row {
+/* Session card */
+.session-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
+  overflow: hidden;
 }
 
-.rec-row .rec-label { font-weight: 600; min-width: 140px; }
-.rec-row .rec-freq  { color: var(--accent); font-size: 0.85rem; min-width: 100px; }
-.rec-row .rec-time  { color: var(--muted); font-size: 0.8rem; min-width: 140px; }
-.rec-row .rec-dur   { color: var(--muted); font-size: 0.8rem; min-width: 60px; }
-.rec-row .rec-snr   { color: var(--muted); font-size: 0.8rem; min-width: 80px; }
-.rec-row .rec-actions { margin-left: auto; display: flex; gap: 6px; }
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  flex-wrap: wrap;
+  user-select: none;
+}
+.session-header:hover { background: rgba(255,255,255,0.03); }
 
-.rec-row .rec-actions a,
-.rec-row .rec-actions button {
+.sess-toggle { color: var(--muted); font-size: 0.7rem; min-width: 10px; }
+.sess-label  { font-weight: 600; min-width: 120px; }
+.sess-freq   { color: var(--accent); font-size: 0.85rem; min-width: 90px; }
+.sess-mode   { color: var(--muted); font-size: 0.8rem; min-width: 40px; }
+.sess-time   { color: var(--muted); font-size: 0.8rem; min-width: 140px; }
+.sess-dur    { color: var(--muted); font-size: 0.8rem; min-width: 60px; }
+.sess-snr    { color: var(--muted); font-size: 0.8rem; min-width: 80px; }
+.sess-count  { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
+
+.session-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 10px;
+  flex-wrap: wrap;
+}
+.session-actions a,
+.session-actions button {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text);
@@ -164,8 +333,143 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   text-decoration: none;
   display: inline-block;
 }
-.rec-row .rec-actions a:hover    { border-color: var(--accent2); color: var(--accent2); }
-.rec-row .rec-actions button:hover { border-color: var(--danger); color: var(--danger); }
+.session-actions a:hover { border-color: var(--accent2); color: var(--accent2); }
+.session-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.session-actions button.danger-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+/* Segment rows (inside expanded session) */
+.session-segments {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.seg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px 8px 32px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  flex-wrap: wrap;
+}
+.seg-row:last-child { border-bottom: none; }
+
+.seg-idx  { color: var(--muted); font-size: 0.75rem; min-width: 28px; }
+.seg-time { color: var(--muted); font-size: 0.8rem; min-width: 140px; }
+.seg-dur  { color: var(--muted); font-size: 0.8rem; min-width: 60px; }
+.seg-snr  { color: var(--muted); font-size: 0.8rem; min-width: 80px; }
+.seg-actions { margin-left: auto; display: flex; gap: 6px; }
+.seg-actions a,
+.seg-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.72rem;
+  text-decoration: none;
+  display: inline-block;
+}
+.seg-actions a:hover { border-color: var(--accent2); color: var(--accent2); }
+.seg-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.seg-actions button.play-seg-btn { min-width: 28px; text-align: center; }
+
+/* ── Session timeline player ── */
+.session-player {
+  border-top: 1px solid var(--border);
+  background: rgba(0,0,0,0.18);
+  padding: 10px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sess-seek-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sess-seek-label { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+.sess-seek-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 0.82rem;
+  color-scheme: dark;
+}
+.sess-seek-btn {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  padding: 4px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.sess-seek-btn:hover { opacity: 0.85; }
+.sess-now-playing {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-left: 4px;
+}
+
+.sess-player-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sess-player-controls audio {
+  flex: 1;
+  height: 32px;
+  accent-color: var(--accent);
+  color-scheme: dark;
+}
+.sess-prev-btn,
+.sess-next-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.sess-prev-btn:disabled,
+.sess-next-btn:disabled { opacity: 0.3; cursor: default; }
+.sess-prev-btn:not(:disabled):hover,
+.sess-next-btn:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Inline segment player ── */
+/* Make seg-row a grid so the player can span full width */
+.seg-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 1fr 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px 8px 32px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: background 0.15s;
+}
+.seg-row:last-child { border-bottom: none; }
+.seg-row.seg-active { background: rgba(79,142,247,0.08); }
+
+.seg-player {
+  grid-column: 1 / -1;
+  width: 100%;
+  padding: 4px 0 2px;
+}
+.seg-player audio {
+  width: 100%;
+  height: 32px;
+  accent-color: var(--accent);
+  color-scheme: dark;
+}
 
 /* ── Pagination ── */
 #pagination {
@@ -235,5 +539,452 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .error { color: var(--danger); font-size: 0.8rem; }
 .hidden { display: none !important; }
 
+/* ── Live badge ── */
+.live-badge {
+  display: inline-block;
+  background: #7f1d1d;
+  color: #fca5a5;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 7px;
+  border-radius: 99px;
+  vertical-align: middle;
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+/* ── Live session card ── */
+.session-live {
+  border-color: #7f1d1d;
+}
+.session-live .session-header {
+  background: rgba(127,29,29,0.12);
+}
+.session-live .session-header:hover {
+  background: rgba(127,29,29,0.2);
+}
+
+/* ── Live segment row ── */
+.seg-live {
+  background: rgba(127,29,29,0.08);
+}
+.seg-live .seg-idx {
+  /* override the default muted colour — the live-badge handles colour */
+  color: inherit;
+}
+
+/* ── Channel card live audio player ── */
+.ch-live-player {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.ch-live-player audio {
+  width: 100%;
+  height: 32px;
+  accent-color: var(--accent);
+  color-scheme: dark;
+}
+
+/* ── Channel card rolling SNR chart ── */
+.ch-snr-chart {
+  display: block;
+  width: 100%;
+  height: 32px;
+  border-radius: 3px;
+  margin-top: 6px;
+  background: rgba(0,0,0,0.3);
+}
+
+/* ── SNR timeline canvas ── */
+.snr-timeline-wrap {
+  position: relative;
+  margin-bottom: 8px;
+}
+.snr-timeline {
+  display: block;
+  width: 100%;
+  height: 72px;
+  border-radius: 4px;
+  cursor: crosshair;
+  background: rgba(0,0,0,0.25);
+}
+.snr-timeline-empty {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: center;
+  padding: 6px 0;
+}
+
+/* ── SNR timeline hover tooltip ── */
+.snr-tip {
+  display: none;
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  background: rgba(20, 20, 30, 0.92);
+  color: #e0e0e0;
+  font-size: 0.78rem;
+  font-family: monospace;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.15);
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
 /* ── Empty state ── */
 .empty { color: var(--muted); text-align: center; padding: 32px; font-size: 0.9rem; }
+
+/* ── VOX alert bell button ── */
+.sr-settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sr-settings-toggle-row .ch-bell-btn {
+  margin-left: auto;
+}
+.ch-bell-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.ch-bell-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ch-bell-btn.ch-bell-on { border-color: #f5c542; color: #f5c542; }
+.ch-bell-btn.ch-bell-on:hover { opacity: 0.8; }
+
+/* ── Bandwidth slider (add-channel form + channel card settings panel) ── */
+.bw-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bw-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.bw-value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 4.5em;
+  text-align: right;
+}
+
+.bw-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+  height: 4px;
+}
+
+/* ── Smart Record (VOX) ── */
+
+/* VOX badge on channel card header */
+.sr-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  letter-spacing: 0.04em;
+  background: #2a2d3a;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.sr-badge-idle      { background: #1e2030; color: var(--muted); }
+.sr-badge-arming    { background: #2d2a10; color: #f5c542; border-color: #f5c542; }
+.sr-badge-recording { background: #0f2a1a; color: var(--accent2); border-color: var(--accent2); }
+.sr-badge-tail      { background: #2a1a10; color: #fb923c; border-color: #fb923c; }
+
+/* Smart record settings wrap inside channel card */
+.sr-settings-wrap {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.sr-settings-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.sr-settings-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+.sr-settings-panel {
+  margin-top: 8px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sr-mode-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.sr-mode-label select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+
+/* Shared grid for smart-record threshold fields (add form + card panel) */
+.smart-record-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.smart-record-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.smart-record-grid input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  width: 100%;
+}
+.smart-record-grid input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.smart-record-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Smart-record fields in the add-channel form */
+.smart-record-fields {
+  background: rgba(0,0,0,0.15);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sr-save-btn {
+  align-self: flex-start;
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  font-size: 0.8rem;
+  padding: 4px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.sr-save-btn:hover { opacity: 0.85; }
+
+.sr-save-status {
+  font-size: 0.78rem;
+  margin-left: 8px;
+}
+.sr-save-status.ok    { color: var(--accent2); }
+.sr-save-status.error { color: var(--danger); }
+
+/* ── Schedule badge on channel card header ── */
+.sched-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+.sched-badge-waiting { background: #1e2030; color: var(--muted); }
+.sched-badge-active  { background: #0f2a1a; color: var(--accent2); border-color: var(--accent2); }
+
+/* ── Schedule "waiting" channel status pill ── */
+.ch-status.sched-waiting { background: #1e2030; color: var(--muted); }
+
+/* ── Next-transition hint below status pill ── */
+.ch-sched-next {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+/* ── Schedule fields container (add-channel form + card panel) ── */
+.sched-fields {
+  background: rgba(0,0,0,0.15);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Schedule editor ── */
+.sched-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sched-tz-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.sched-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.sched-label input[type="text"],
+.sched-label input[type="time"],
+.sched-label input[type="date"],
+.sched-label select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 0.82rem;
+  color-scheme: dark;
+}
+.sched-label input:focus,
+.sched-label select:focus { outline: none; border-color: var(--accent); }
+
+/* ── Schedule rule row ── */
+.sched-rule-row {
+  background: rgba(0,0,0,0.18);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sched-rule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sched-rule-num {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sched-remove-rule-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 1px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.sched-remove-rule-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+/* ── Weekday checkboxes ── */
+.sched-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.sched-wd-label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: rgba(0,0,0,0.2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.12s, color 0.12s;
+}
+.sched-wd-label:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(79,142,247,0.1);
+}
+.sched-wd-label input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 12px;
+  height: 12px;
+}
+
+/* ── Time + date rows inside a rule ── */
+.sched-time-row,
+.sched-date-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── "Add rule" button ── */
+.sched-add-rule-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.sched-add-rule-btn:hover { border-color: var(--accent); color: var(--accent); }

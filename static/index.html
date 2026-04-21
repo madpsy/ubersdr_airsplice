@@ -15,8 +15,81 @@
 
   <main>
     <section id="channels-section">
-      <h2>Channels</h2>
+      <div class="section-header">
+        <h2>Channels</h2>
+        <button id="add-channel-btn" class="hidden">+ Add Channel</button>
+      </div>
       <div id="channels-grid"></div>
+
+      <div id="add-channel-form" class="add-channel-panel hidden">
+        <h3>Add Channel</h3>
+        <div class="add-channel-fields">
+          <label>Name (optional)
+            <input type="text" id="add-name" placeholder="e.g. Maritime 8 MHz" />
+          </label>
+          <label>Frequency (kHz)
+            <input type="number" id="add-freq" placeholder="e.g. 7880" min="10" max="30000" step="0.001" />
+          </label>
+          <label>Mode
+            <select id="add-mode">
+              <option value="usb">USB</option>
+              <option value="lsb">LSB</option>
+              <option value="am">AM</option>
+              <option value="sam">SAM</option>
+              <option value="fm">FM</option>
+              <option value="nfm">NFM</option>
+              <option value="cw">CW</option>
+            </select>
+          </label>
+          <div class="bw-row">
+            <label class="bw-label">Bandwidth
+              <span class="bw-value" id="add-bw-value">2.7 kHz</span>
+            </label>
+            <input type="range" id="add-bw-slider" class="bw-slider"
+                   min="300" max="6000" step="50" value="2700" />
+          </div>
+          <label>Recording mode
+            <select id="add-rec-mode">
+              <option value="continuous">Continuous</option>
+              <option value="smart">Signal Activated (VOX)</option>
+              <option value="scheduled">Scheduled</option>
+            </select>
+          </label>
+          <div id="add-smart-fields" class="smart-record-fields hidden">
+            <div class="smart-record-grid">
+              <label>Start SNR threshold (dB)
+                <input type="number" id="add-sr-start-thresh" value="50" step="0.5" />
+              </label>
+              <label>Start hold (seconds)
+                <input type="number" id="add-sr-start-hold" value="2" min="0.1" step="0.1" />
+              </label>
+              <label>Stop SNR threshold (dB)
+                <input type="number" id="add-sr-stop-thresh" value="35" step="0.5" />
+              </label>
+              <label>Stop hold (seconds)
+                <input type="number" id="add-sr-stop-hold" value="5" min="0.1" step="0.1" />
+              </label>
+              <label>Max recording length (minutes, 0 = unlimited)
+                <input type="number" id="add-sr-max-record-mins" value="0" min="0" step="0.5" />
+              </label>
+            </div>
+            <p class="smart-record-hint">
+              Recording starts when SNR ≥ start threshold for ≥ start hold seconds.<br>
+              Recording stops when SNR &lt; stop threshold for ≥ stop hold seconds.<br>
+              If max length &gt; 0, recording stops when that duration is reached and will not restart until the SNR drops below the stop threshold and rises again above the start threshold.
+            </p>
+          </div>
+          <div id="add-sched-fields" class="sched-fields hidden">
+            <!-- Schedule editor is injected by buildScheduleEditor() in app.js -->
+            <div id="add-sched-editor-mount"></div>
+          </div>
+          <div class="add-channel-actions">
+            <button id="add-channel-submit">Add</button>
+            <button id="add-channel-cancel">Cancel</button>
+          </div>
+        </div>
+        <p id="add-channel-error" class="error hidden"></p>
+      </div>
     </section>
 
     <section id="recordings-section">
