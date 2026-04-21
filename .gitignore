@@ -1,0 +1,15 @@
+# Compiled binary
+ubersdr_airsplice
+
+# Output directories
+recordings/
+data/
+
+# Go test cache
+*.test
+*.out
+
+# Editor
+.vscode/
+.idea/
+*.swp

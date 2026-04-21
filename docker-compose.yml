@@ -1,0 +1,31 @@
+services:
+  ubersdr_airsplice:
+    image: madpsy/ubersdr_airsplice:latest
+    container_name: airsplice
+    restart: unless-stopped
+    environment:
+      # UberSDR WebSocket URL
+      UBERSDR_URL: "ws://ubersdr:8080/ws"
+      #
+      # Comma-separated freq:mode pairs to record simultaneously, e.g.:
+      #   UBERSDR_CHANNELS: "7880000:usb,4610000:usb,14300000:usb"
+      UBERSDR_CHANNELS: "7880000:usb,4610000:usb"
+      #
+      # Uncomment and set as needed:
+      # UBERSDR_PASS: ""
+      # UI_PASSWORD: ""          # Set to enable password-protected delete in the web UI
+      OUTPUT_DIR: "/data"
+      # WEB_PORT: "6095"
+      # SEGMENT_SECS: "300"      # Rotate to a new WAV file every N seconds (0 = continuous)
+      # CLEANUP_ALL_DAYS: "30"   # Delete ALL recordings older than N days (0=disabled)
+    ports:
+      - "6095:6095"
+    networks:
+      - sdr-network
+    volumes:
+      - ./recordings:/data
+
+networks:
+  sdr-network:
+    external: true
+    name: ubersdr_sdr-network

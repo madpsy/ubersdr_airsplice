@@ -1,0 +1,6 @@
+.git
+.gitignore
+recordings/
+data/
+ubersdr_airsplice
+*.test
