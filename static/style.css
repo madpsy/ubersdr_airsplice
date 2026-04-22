@@ -762,6 +762,27 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   font-size: 0.85rem;
 }
 
+.sr-quota-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.sr-quota-label input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  width: 100%;
+}
+.sr-quota-label input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* Shared grid for smart-record threshold fields (add form + card panel) */
 .smart-record-grid {
   display: grid;

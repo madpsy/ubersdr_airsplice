@@ -1,4 +1,4 @@
-// cleanup.go — background age-based cleanup of old recordings
+// cleanup.go — background age-based and quota-based cleanup of old recordings
 package main
 
 import (
@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -112,28 +113,148 @@ func (rc *retentionConfig) save(configPath string) {
 }
 
 // ---------------------------------------------------------------------------
+// quotaConfig — live-updatable overall and per-channel storage quota settings
+// ---------------------------------------------------------------------------
+
+// quotaConfig holds the current storage quota policy.
+// OverallMB is the maximum total disk usage in MB across all channels (0 = unlimited).
+// Channels maps label → max_mb (0 = use OverallMB; if that is also 0 = unlimited).
+type quotaConfig struct {
+	mu        sync.RWMutex
+	OverallMB int64            `json:"overall_mb"`
+	Channels  map[string]int64 `json:"channels"`
+}
+
+func newQuotaConfig() *quotaConfig {
+	return &quotaConfig{Channels: make(map[string]int64)}
+}
+
+// getOverall returns the overall quota in bytes (0 = unlimited).
+func (qc *quotaConfig) getOverall() int64 {
+	qc.mu.RLock()
+	defer qc.mu.RUnlock()
+	return qc.OverallMB * 1024 * 1024
+}
+
+// getForLabel returns the per-channel quota in bytes for a given label (0 = unlimited).
+func (qc *quotaConfig) getForLabel(label string) int64 {
+	qc.mu.RLock()
+	defer qc.mu.RUnlock()
+	if mb, ok := qc.Channels[label]; ok {
+		return mb * 1024 * 1024
+	}
+	return 0
+}
+
+// setOverall updates the overall quota in MB.
+func (qc *quotaConfig) setOverall(mb int64) {
+	qc.mu.Lock()
+	qc.OverallMB = mb
+	qc.mu.Unlock()
+}
+
+// setForLabel sets the per-channel quota in MB for a specific label.
+func (qc *quotaConfig) setForLabel(label string, mb int64) {
+	qc.mu.Lock()
+	if qc.Channels == nil {
+		qc.Channels = make(map[string]int64)
+	}
+	if mb == 0 {
+		delete(qc.Channels, label)
+	} else {
+		qc.Channels[label] = mb
+	}
+	qc.mu.Unlock()
+}
+
+// snapshot returns a copy of the config safe for JSON serialisation.
+func (qc *quotaConfig) snapshot() (overallMB int64, channels map[string]int64) {
+	qc.mu.RLock()
+	defer qc.mu.RUnlock()
+	ch := make(map[string]int64, len(qc.Channels))
+	for k, v := range qc.Channels {
+		ch[k] = v
+	}
+	return qc.OverallMB, ch
+}
+
+// load reads quota.json from configPath; silently ignores missing file.
+func (qc *quotaConfig) load(configPath string) {
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		log.Printf("quota: load %s: %v", configPath, err)
+		return
+	}
+	qc.mu.Lock()
+	defer qc.mu.Unlock()
+	if qc.Channels == nil {
+		qc.Channels = make(map[string]int64)
+	}
+	if err := json.Unmarshal(data, qc); err != nil {
+		log.Printf("quota: parse %s: %v", configPath, err)
+	}
+}
+
+// save writes quota.json atomically.
+func (qc *quotaConfig) save(configPath string) {
+	qc.mu.RLock()
+	data, err := json.MarshalIndent(qc, "", "  ")
+	qc.mu.RUnlock()
+	if err != nil {
+		return
+	}
+	tmp := configPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		log.Printf("quota: save %s: %v", configPath, err)
+		return
+	}
+	if err := os.Rename(tmp, configPath); err != nil {
+		log.Printf("quota: rename %s: %v", configPath, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Background cleanup worker
 // ---------------------------------------------------------------------------
 
-// startAgeCleanup runs a ticker every 5 minutes and deletes recordings older
-// than the configured retention period per channel.
+// startCleanup runs a ticker every 5 minutes and:
+//  1. Deletes recordings older than the configured retention period per channel.
+//  2. Enforces per-channel and overall storage quotas by deleting oldest segments first.
+//
 // keepDays is the legacy CLI flag value used as the initial default when no
 // retention.json exists and keepDays > 0.
-func startAgeCleanup(store *recordingStore, outputDir string, keepDays int, rc *retentionConfig) {
+// maxStorageMB is the overall storage limit in MB (0 = unlimited); used as the
+// initial OverallMB when no quota.json exists and maxStorageMB > 0.
+func startCleanup(store *recordingStore, outputDir string, keepDays int, rc *retentionConfig, qc *quotaConfig, maxStorageMB int64) {
 	// Apply legacy CLI default if no retention.json was loaded.
 	def, _ := rc.snapshot()
 	if def == 0 && keepDays > 0 {
 		rc.setDefault(keepDays * 24)
 	}
 
-	log.Printf("cleanup: age worker started (check every 5 min)")
+	// Apply CLI overall quota if no quota.json was loaded.
+	overall, _ := qc.snapshot()
+	if overall == 0 && maxStorageMB > 0 {
+		qc.setOverall(maxStorageMB)
+	}
+
+	log.Printf("cleanup: worker started (check every 5 min)")
 	go func() {
 		ticker := time.NewTicker(cleanupInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			runAgeCleanup(store, outputDir, rc)
+			runQuotaCleanup(store, outputDir, qc)
 		}
 	}()
+}
+
+// startAgeCleanup is kept for backward compatibility; prefer startCleanup.
+func startAgeCleanup(store *recordingStore, outputDir string, keepDays int, rc *retentionConfig) {
+	startCleanup(store, outputDir, keepDays, rc, newQuotaConfig(), 0)
 }
 
 func runAgeCleanup(store *recordingStore, outputDir string, rc *retentionConfig) {
@@ -157,6 +278,100 @@ func runAgeCleanup(store *recordingStore, outputDir string, rc *retentionConfig)
 	log.Printf("cleanup: age pass — %d recording(s) to delete", len(candidates))
 	for _, rec := range candidates {
 		deleteRecordFiles(store, outputDir, rec)
+	}
+}
+
+// runQuotaCleanup enforces per-channel and overall storage quotas by deleting
+// the oldest segments first until usage is within the configured limits.
+func runQuotaCleanup(store *recordingStore, outputDir string, qc *quotaConfig) {
+	overallLimit := qc.getOverall()
+
+	// Build a map of label → sorted (oldest-first) records and their WAV sizes.
+	store.mu.RLock()
+	type recWithSize struct {
+		rec  *recordingRecord
+		size int64
+	}
+	byLabel := make(map[string][]recWithSize)
+	var allRecs []recWithSize
+	for _, r := range store.records {
+		p := filepath.Join(outputDir, r.Filename)
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		rws := recWithSize{rec: r, size: fi.Size()}
+		byLabel[r.Label] = append(byLabel[r.Label], rws)
+		allRecs = append(allRecs, rws)
+	}
+	store.mu.RUnlock()
+
+	// Sort each label's list oldest-first.
+	for lbl := range byLabel {
+		sort.Slice(byLabel[lbl], func(i, j int) bool {
+			return byLabel[lbl][i].rec.SavedAt.Before(byLabel[lbl][j].rec.SavedAt)
+		})
+	}
+	// Sort all records oldest-first for overall quota pass.
+	sort.Slice(allRecs, func(i, j int) bool {
+		return allRecs[i].rec.SavedAt.Before(allRecs[j].rec.SavedAt)
+	})
+
+	deleted := make(map[string]struct{}) // IDs deleted in this pass
+
+	// --- Per-channel quota pass ---
+	for lbl, recs := range byLabel {
+		limit := qc.getForLabel(lbl)
+		if limit <= 0 {
+			continue
+		}
+		var used int64
+		for _, rws := range recs {
+			used += rws.size
+		}
+		if used <= limit {
+			continue
+		}
+		log.Printf("cleanup: quota pass — channel %q using %d MB, limit %d MB",
+			lbl, used/1024/1024, limit/1024/1024)
+		for _, rws := range recs {
+			if used <= limit {
+				break
+			}
+			if _, alreadyDel := deleted[rws.rec.ID]; alreadyDel {
+				continue
+			}
+			deleteRecordFiles(store, outputDir, rws.rec)
+			deleted[rws.rec.ID] = struct{}{}
+			used -= rws.size
+		}
+	}
+
+	// --- Overall quota pass ---
+	if overallLimit <= 0 {
+		return
+	}
+	var totalUsed int64
+	for _, rws := range allRecs {
+		if _, del := deleted[rws.rec.ID]; !del {
+			totalUsed += rws.size
+		}
+	}
+	if totalUsed <= overallLimit {
+		return
+	}
+	log.Printf("cleanup: quota pass — overall using %d MB, limit %d MB",
+		totalUsed/1024/1024, overallLimit/1024/1024)
+	for _, rws := range allRecs {
+		if totalUsed <= overallLimit {
+			break
+		}
+		if _, alreadyDel := deleted[rws.rec.ID]; alreadyDel {
+			continue
+		}
+		deleteRecordFiles(store, outputDir, rws.rec)
+		deleted[rws.rec.ID] = struct{}{}
+		totalUsed -= rws.size
 	}
 }
 

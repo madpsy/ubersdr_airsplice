@@ -69,6 +69,7 @@ type channelConfig struct {
 	SmartRecord SmartRecordConfig `json:"smart_record,omitempty"` // VOX-style gated recording
 	Schedule    ScheduleConfig    `json:"schedule,omitempty"`     // time-based scheduled recording
 	BandwidthHz int               `json:"bandwidth_hz,omitempty"` // filter bandwidth in Hz; 0 = server default
+	MaxMB       int64             `json:"max_mb,omitempty"`       // per-channel storage quota in MB; 0 = use overall limit
 }
 
 // ---------------------------------------------------------------------------
@@ -86,9 +87,10 @@ type channelManager struct {
 	hub         *sseHub
 	ctx         context.Context
 	configPath  string // path to channels.json
+	quota       *quotaConfig
 }
 
-func newChannelManager(ctx context.Context, ubersdrURL, password string, segmentSecs int, store *recordingStore, hub *sseHub, configPath string) *channelManager {
+func newChannelManager(ctx context.Context, ubersdrURL, password string, segmentSecs int, store *recordingStore, hub *sseHub, configPath string, qc *quotaConfig) *channelManager {
 	return &channelManager{
 		ubersdrURL:  ubersdrURL,
 		password:    password,
@@ -97,6 +99,7 @@ func newChannelManager(ctx context.Context, ubersdrURL, password string, segment
 		hub:         hub,
 		ctx:         ctx,
 		configPath:  configPath,
+		quota:       qc,
 	}
 }
 
@@ -247,6 +250,11 @@ func (m *channelManager) save() {
 		if ch.label != autoLabel {
 			name = ch.label
 		}
+		// Read per-channel quota from the quota config.
+		var maxMB int64
+		if m.quota != nil {
+			maxMB = m.quota.getForLabel(ch.label) / 1024 / 1024
+		}
 		cfgs = append(cfgs, channelConfig{
 			ID:          ch.channelID,
 			FreqHz:      ch.inst.freqHz,
@@ -255,6 +263,7 @@ func (m *channelManager) save() {
 			SmartRecord: ch.getSmartRecord(),
 			Schedule:    ch.getSchedule(),
 			BandwidthHz: ch.inst.getBandwidth(),
+			MaxMB:       maxMB,
 		})
 	}
 	m.mu.RUnlock()
@@ -298,6 +307,15 @@ func (m *channelManager) load() {
 	for _, cfg := range cfgs {
 		if _, err := m.add(cfg.FreqHz, cfg.Mode, cfg.Name, cfg.ID, cfg.SmartRecord, cfg.Schedule, cfg.BandwidthHz); err != nil {
 			log.Printf("[manager] load: %v", err)
+			continue
+		}
+		// Restore per-channel quota into the quota config.
+		if cfg.MaxMB > 0 && m.quota != nil {
+			label := cfg.Name
+			if label == "" {
+				label = fmt.Sprintf("%d_%s", cfg.FreqHz, cfg.Mode)
+			}
+			m.quota.setForLabel(label, cfg.MaxMB)
 		}
 	}
 	log.Printf("[manager] loaded %d channel(s) from %s", len(cfgs), m.configPath)
@@ -306,6 +324,15 @@ func (m *channelManager) load() {
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
+
+func envInt64Or(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
 
 func main() {
 	var (
@@ -321,6 +348,9 @@ func main() {
 
 		cleanupAllDays = flag.Int("cleanup-all-days", envIntOr("CLEANUP_ALL_DAYS", 30),
 			"Delete ALL recordings older than N days; 0 = disabled (env: CLEANUP_ALL_DAYS)")
+
+		maxStorageMB = flag.Int64("max-storage-mb", envInt64Or("MAX_STORAGE_MB", 20480),
+			"Maximum total storage in MB across all channels; 0 = unlimited, default 20480 (20 GB) (env: MAX_STORAGE_MB)")
 	)
 
 	flag.Parse()
@@ -340,6 +370,9 @@ func main() {
 	log.Printf("[main] Listen addr:   %s", *listenAddr)
 	log.Printf("[main] Segment secs:  %d", *segmentSecs)
 	log.Printf("[main] Channels cfg:  %s", configPath)
+	if *maxStorageMB > 0 {
+		log.Printf("[main] Max storage:   %d MB", *maxStorageMB)
+	}
 
 	hub := newSSEHub()
 	store := newRecordingStore(*outputDir, hub)
@@ -349,19 +382,24 @@ func main() {
 	rc := newRetentionConfig()
 	rc.load(retentionCfgPath)
 
-	startAgeCleanup(store, *outputDir, *cleanupAllDays, rc)
+	// Load quota config from disk (falls back to CLI maxStorageMB default).
+	quotaCfgPath := filepath.Join(*outputDir, "quota.json")
+	qc := newQuotaConfig()
+	qc.load(quotaCfgPath)
+
+	startCleanup(store, *outputDir, *cleanupAllDays, rc, qc, *maxStorageMB)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	mgr := newChannelManager(ctx, *ubersdrURL, *password, *segmentSecs, store, hub, configPath)
+	mgr := newChannelManager(ctx, *ubersdrURL, *password, *segmentSecs, store, hub, configPath, qc)
 
 	// Load persisted channels from channels.json.
 	mgr.load()
 
 	// Start HTTP server in background.
 	go func() {
-		if err := startHTTPServer(*listenAddr, store, hub, mgr, *uiPassword, rc, retentionCfgPath); err != nil {
+		if err := startHTTPServer(*listenAddr, store, hub, mgr, *uiPassword, rc, retentionCfgPath, qc, quotaCfgPath); err != nil {
 			log.Fatalf("[main] HTTP server: %v", err)
 		}
 	}()

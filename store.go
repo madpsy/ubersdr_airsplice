@@ -266,7 +266,7 @@ func (s *recordingStore) add(rec *recordingRecord) error {
 	// Session-level sidecar: session_{sessionID}.json — written after unlock
 	// so listSessions sees the new record.
 	if rec.SessionID != "" {
-		if ss := s.getSession(rec.SessionID); ss != nil {
+		if ss := s.getSession(rec.SessionID, ""); ss != nil {
 			ssPath := filepath.Join(s.outputDir, "session_"+rec.SessionID+".json")
 			if ssData, err := json.MarshalIndent(ss, "", "  "); err == nil {
 				_ = writeAtomic(ssPath, ssData)
@@ -311,6 +311,38 @@ func (s *recordingStore) list(label string, limit, offset int) []*recordingRecor
 	return out
 }
 
+// availableDates returns the set of UTC calendar dates (YYYY-MM-DD) that have
+// at least one recording, newest first.
+// channelID filters by channel UUID; pass "" for all channels.
+func (s *recordingStore) availableDates(channelID string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := make(map[string]struct{})
+	var order []string
+	for _, r := range s.records {
+		if channelID != "" && r.ChannelID != channelID {
+			continue
+		}
+		d := r.StartedAt.UTC().Format("2006-01-02")
+		if _, ok := seen[d]; !ok {
+			seen[d] = struct{}{}
+			order = append(order, d)
+		}
+	}
+	return order
+}
+
+// dateFilter returns true when the record falls on the given UTC date string
+// (YYYY-MM-DD).  An empty date string matches everything (used internally by
+// getSession for stream/delete operations; the public /api/sessions endpoint
+// always supplies a specific date).
+func dateFilter(r *recordingRecord, date string) bool {
+	if date == "" {
+		return true
+	}
+	return r.StartedAt.UTC().Format("2006-01-02") == date
+}
+
 // sessionSummary is the API representation of one recording session.
 type sessionSummary struct {
 	SessionID    string             `json:"session_id"`
@@ -329,8 +361,10 @@ type sessionSummary struct {
 // listByChannelID groups ALL segments for a channel_id UUID into a single
 // sessionSummary (ignoring session boundaries). Records without a channel_id
 // fall back to grouping by session_id. This is the preferred view for the UI.
-// The filter parameter is a channel_id UUID (or "" for all channels).
-func (s *recordingStore) listByChannelID(channelID string, limit, offset int) ([]*sessionSummary, int) {
+// channelID filters by channel UUID (or "" for all channels).
+// date is a UTC calendar date string "YYYY-MM-DD"; pass "" only for internal
+// calls (stream/delete) that need all dates — the public API always passes a date.
+func (s *recordingStore) listByChannelID(channelID string, limit, offset int, date string) ([]*sessionSummary, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -338,6 +372,9 @@ func (s *recordingStore) listByChannelID(channelID string, limit, offset int) ([
 	var order []string
 	for _, r := range s.records {
 		if channelID != "" && r.ChannelID != channelID {
+			continue
+		}
+		if !dateFilter(r, date) {
 			continue
 		}
 		// Group key: prefer channel_id UUID; fall back to session_id for old records.
@@ -427,7 +464,8 @@ func (s *recordingStore) listByChannelID(channelID string, limit, offset int) ([
 
 // listSessions groups completed segments by session_id and returns summaries
 // newest-first. Segments within each session are ordered by segment_index.
-func (s *recordingStore) listSessions(label string, limit, offset int) ([]*sessionSummary, int) {
+// date is an optional UTC calendar date string "YYYY-MM-DD" (or "" for all dates).
+func (s *recordingStore) listSessions(label string, limit, offset int, date string) ([]*sessionSummary, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -439,6 +477,9 @@ func (s *recordingStore) listSessions(label string, limit, offset int) ([]*sessi
 	var order []string
 	for _, r := range s.records {
 		if label != "" && r.Label != label {
+			continue
+		}
+		if !dateFilter(r, date) {
 			continue
 		}
 		key := r.SessionID
@@ -518,15 +559,16 @@ func (s *recordingStore) listSessions(label string, limit, offset int) ([]*sessi
 // getSession returns the sessionSummary for a single session ID or channel UUID, or nil.
 // It first searches by session_id (exact session), then falls back to searching
 // the channel-grouped view (where SessionID == channel_id UUID).
-func (s *recordingStore) getSession(sessionID string) *sessionSummary {
-	sessions, _ := s.listSessions("", 0, 0)
+// date is an optional UTC calendar date filter (YYYY-MM-DD); "" means all dates.
+func (s *recordingStore) getSession(sessionID string, date string) *sessionSummary {
+	sessions, _ := s.listSessions("", 0, 0, date)
 	for _, ss := range sessions {
 		if ss.SessionID == sessionID {
 			return ss
 		}
 	}
 	// Fall back: treat sessionID as a channel UUID and return the channel-grouped summary.
-	channelSessions, _ := s.listByChannelID(sessionID, 0, 0)
+	channelSessions, _ := s.listByChannelID(sessionID, 0, 0, date)
 	for _, ss := range channelSessions {
 		if ss.SessionID == sessionID {
 			return ss
@@ -577,7 +619,7 @@ func (s *recordingStore) delete(id string) error {
 	if sessionID != "" {
 		ssPath := filepath.Join(s.outputDir, "session_"+sessionID+".json")
 		if sessionHasRemaining {
-			if ss := s.getSession(sessionID); ss != nil {
+			if ss := s.getSession(sessionID, ""); ss != nil {
 				if ssData, err := json.MarshalIndent(ss, "", "  "); err == nil {
 					_ = writeAtomic(ssPath, ssData)
 				}

@@ -3,12 +3,14 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -22,6 +24,85 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// ---------------------------------------------------------------------------
+// gzip middleware — transparently compress compressible responses
+// ---------------------------------------------------------------------------
+
+// noopCloser wraps an io.Writer so it satisfies io.WriteCloser without
+// actually closing anything (used when the underlying writer is not a Closer).
+type noopCloser struct{ io.Writer }
+
+func (noopCloser) Close() error { return nil }
+
+// gzipResponseWriter wraps http.ResponseWriter and compresses the body with
+// gzip when the client advertises Accept-Encoding: gzip.
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz          io.WriteCloser
+	wroteHeader bool
+}
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	if !g.wroteHeader {
+		g.wroteHeader = true
+		g.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	return g.gz.Write(b)
+}
+
+// Flush satisfies http.Flusher: flush the gzip stream then the underlying
+// response writer (if it also implements Flusher).
+func (g *gzipResponseWriter) Flush() {
+	// gzip.Writer does not implement Flush directly; Close would finalise the
+	// stream, so we just flush the underlying transport.
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// gzipMiddleware wraps handler h and compresses responses for clients that
+// send Accept-Encoding: gzip, except for streaming/WebSocket paths where
+// buffering would break the protocol.
+func gzipMiddleware(h http.Handler) http.Handler {
+	// Paths (prefix-matched) that must NOT be compressed.
+	skipPrefixes := []string{
+		"/api/snr",           // SSE streams (/api/snr and /api/snr/all)
+		"/api/audio/preview", // streaming WAV
+		"/api/live/",         // WebSocket upgrade
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip if client doesn't accept gzip.
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		// Skip streaming / WebSocket paths.
+		for _, pfx := range skipPrefixes {
+			if strings.HasPrefix(r.URL.Path, pfx) {
+				h.ServeHTTP(w, r)
+				return
+			}
+		}
+		// Wrap the response writer.
+		gz, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		if err != nil {
+			h.ServeHTTP(w, r)
+			return
+		}
+		defer gz.Close()
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Del("Content-Length") // length is unknown after compression
+		grw := &gzipResponseWriter{ResponseWriter: w, gz: gz}
+		h.ServeHTTP(grw, r)
+	})
+}
 
 // ---------------------------------------------------------------------------
 // Session store — in-memory set of valid session tokens
@@ -197,7 +278,7 @@ func putU16LE(b []byte, v uint16) {
 // startHTTPServer wires all routes and starts listening.
 // ---------------------------------------------------------------------------
 
-func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *channelManager, uiPassword string, rc *retentionConfig, retentionCfgPath string) error {
+func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *channelManager, uiPassword string, rc *retentionConfig, retentionCfgPath string, qc *quotaConfig, quotaCfgPath string) error {
 	sessions := newSessionStore()
 	mux := http.NewServeMux()
 
@@ -384,6 +465,14 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			if !requiresAuth(w, r, uiPassword, sessions) {
 				return
 			}
+			// Capture the channel_id before removal so the SSE event can carry it.
+			removedChannelID := ""
+			for _, ch := range mgr.list() {
+				if ch.label == label {
+					removedChannelID = ch.channelID
+					break
+				}
+			}
 			if err := mgr.remove(label); err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 				return
@@ -391,12 +480,12 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			mgr.save()
 			hub.broadcast(sseEvent{
 				Event: "channel_removed",
-				Data:  map[string]string{"label": label},
+				Data:  map[string]interface{}{"label": label, "channel_id": removedChannelID},
 			})
 			writeJSON(w, map[string]string{"status": "removed", "label": label})
 
 		case http.MethodPatch:
-			// PATCH /api/channels/{label} — rename, update smart-record config, schedule, and/or bandwidth.
+			// PATCH /api/channels/{label} — rename, update smart-record config, schedule, bandwidth, and/or quota.
 			if !requiresAuth(w, r, uiPassword, sessions) {
 				return
 			}
@@ -405,13 +494,14 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				SmartRecord *SmartRecordConfig `json:"smart_record"`
 				Schedule    *ScheduleConfig    `json:"schedule"`
 				BandwidthHz *int               `json:"bandwidth_hz"`
+				MaxMB       *int64             `json:"max_mb"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
 				return
 			}
-			if body.Name == nil && body.SmartRecord == nil && body.Schedule == nil && body.BandwidthHz == nil {
-				http.Error(w, `{"error":"name, smart_record, schedule, or bandwidth_hz required"}`, http.StatusBadRequest)
+			if body.Name == nil && body.SmartRecord == nil && body.Schedule == nil && body.BandwidthHz == nil && body.MaxMB == nil {
+				http.Error(w, `{"error":"name, smart_record, schedule, bandwidth_hz, or max_mb required"}`, http.StatusBadRequest)
 				return
 			}
 
@@ -469,6 +559,20 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				hub.broadcast(sseEvent{
 					Event: "channel_updated",
 					Data:  map[string]interface{}{"label": newLabel, "bandwidth_hz": *body.BandwidthHz},
+				})
+			}
+
+			// Apply per-channel storage quota if provided.
+			if body.MaxMB != nil {
+				if *body.MaxMB < 0 {
+					http.Error(w, `{"error":"max_mb must be >= 0"}`, http.StatusBadRequest)
+					return
+				}
+				qc.setForLabel(newLabel, *body.MaxMB)
+				qc.save(quotaCfgPath)
+				hub.broadcast(sseEvent{
+					Event: "channel_updated",
+					Data:  map[string]interface{}{"label": newLabel, "max_mb": *body.MaxMB},
 				})
 			}
 
@@ -563,8 +667,24 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 	})
 
 	// -----------------------------------------------------------------------
-	// GET /api/sessions?label=&limit=20&offset=0
+	// GET /api/dates?channel_id=  — list UTC calendar dates that have recordings
+	//                               (newest first); optional channel UUID filter.
+	// Response: {"dates": ["2026-04-22", "2026-04-21", ...]}
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/dates", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		channelID := r.URL.Query().Get("channel_id")
+		dates := store.availableDates(channelID)
+		writeJSON(w, map[string]interface{}{"dates": dates})
+	})
+
+	// -----------------------------------------------------------------------
+	// GET /api/sessions?label=&limit=20&offset=0&date=YYYY-MM-DD
 	//     Returns sessions (groups of segments) newest-first.
+	//     date defaults to today (UTC); pass date= (empty) for all dates.
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -579,18 +699,30 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 		}
 		offset, _ := strconv.Atoi(q.Get("offset"))
 		groupByChannel := q.Get("group_by") == "channel"
+
+		// date param: always required; default to today if absent or empty.
+		// "All dates" is no longer supported — every request must be scoped to
+		// a specific UTC calendar day to avoid unbounded result sets.
+		date := time.Now().UTC().Format("2006-01-02") // default: today
+		if d, ok := q["date"]; ok && d[0] != "" {
+			date = d[0]
+		}
+
 		var sessions2 []*sessionSummary
 		var total int
 		if groupByChannel {
-			sessions2, total = store.listByChannelID(label, limit, offset)
+			// Filter by channel UUID when provided; label filter is handled by listSessions.
+			channelID := q.Get("channel_id")
+			sessions2, total = store.listByChannelID(channelID, limit, offset, date)
 		} else {
-			sessions2, total = store.listSessions(label, limit, offset)
+			sessions2, total = store.listSessions(label, limit, offset, date)
 		}
 		writeJSON(w, map[string]interface{}{
 			"sessions": sessions2,
 			"total":    total,
 			"limit":    limit,
 			"offset":   offset,
+			"date":     date,
 		})
 	})
 
@@ -613,7 +745,17 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			return
 		}
 
-		ss := store.getSession(sessionID)
+		// For telemetry the caller may pass ?date= to scope the session to a
+		// specific day (so the timeline matches the date-filtered segment list).
+		// For stream/delete we always use all dates so playback/deletion work.
+		q := r.URL.Query()
+		sessionDate := ""
+		if action == "telemetry" {
+			if d, ok := q["date"]; ok {
+				sessionDate = d[0]
+			}
+		}
+		ss := store.getSession(sessionID, sessionDate)
 
 		// For telemetry on a live (not-yet-stored) session, fall back to the
 		// active channel whose session_id matches.
@@ -623,7 +765,10 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				if snap == nil || snap.SessionID != sessionID {
 					continue
 				}
-				// Build a minimal telemetry response from the in-progress .jsonl
+				// Build a minimal telemetry response from the in-progress .jsonl.
+				// When sessionDate is set, only include points from that UTC date
+				// so a channel that has been recording since yesterday doesn't
+				// bleed yesterday's data into today's view.
 				type telPoint struct {
 					T         string   `json:"t"`
 					SNR       SNRStats `json:"snr"`
@@ -632,6 +777,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 					OffsetSec float64  `json:"offset_sec"`
 				}
 				var points []telPoint
+				var refStart time.Time // wall-clock origin for offset_sec
 				if snap.JsonlPath != "" {
 					data, err := os.ReadFile(snap.JsonlPath)
 					if err == nil {
@@ -651,20 +797,41 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 							if err != nil {
 								continue
 							}
+							// Date-filter: skip points not on the requested date.
+							if sessionDate != "" && t.UTC().Format("2006-01-02") != sessionDate {
+								continue
+							}
+							// Use the first matching point as the reference start.
+							if refStart.IsZero() {
+								refStart = t
+							}
 							points = append(points, telPoint{
 								T:         entry.T,
 								SNR:       entry.SNR,
 								LevelDB:   entry.LevelDBFS,
 								SegIdx:    snap.SegmentIndex,
-								OffsetSec: t.Sub(snap.StartedAt).Seconds(),
+								OffsetSec: t.Sub(refStart).Seconds(),
 							})
 						}
 					}
 				}
+				// If no date-filtered points, fall back to snap.StartedAt as origin.
+				if refStart.IsZero() {
+					refStart = snap.StartedAt
+				}
+				// totalDur: when points are date-filtered, base it on the filtered
+				// span (last point offset + one interval) so a long-running segment
+				// that started yesterday doesn't inflate the window to 14+ hours.
+				var totalDur float64
+				if len(points) > 0 {
+					totalDur = points[len(points)-1].OffsetSec + 10
+				} else {
+					totalDur = snap.DurationSec
+				}
 				writeJSON(w, map[string]interface{}{
 					"session_id":   sessionID,
-					"started_at":   snap.StartedAt,
-					"duration_sec": snap.DurationSec,
+					"started_at":   refStart,
+					"duration_sec": totalDur,
 					"points":       points,
 				})
 				return
@@ -785,6 +952,9 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			}
 			// Also append telemetry from the currently-recording (live) segment
 			// for this channel, if any. The live segment is not yet in the store.
+			// When sessionDate is set, only include points from that UTC date so
+			// a long-running segment that started yesterday doesn't bleed into
+			// today's view.
 			for _, ch := range mgr.list() {
 				snap := ch.liveSnapshot()
 				if snap == nil || snap.ChannelID != sessionID {
@@ -811,6 +981,10 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 					}
 					t, err := time.Parse(time.RFC3339, entry.T)
 					if err != nil {
+						continue
+					}
+					// Date-filter: skip points not on the requested date.
+					if sessionDate != "" && t.UTC().Format("2006-01-02") != sessionDate {
 						continue
 					}
 					points = append(points, telPoint{
@@ -1350,6 +1524,88 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 	})
 
 	// -----------------------------------------------------------------------
+	// GET  /api/quota          — read current quota settings
+	// POST /api/quota          — update quota settings (auth-gated)
+	//
+	// GET response:  {"overall_mb":20480,"channels":{"7880000_usb":1024}}
+	// POST body (overall):      {"overall_mb": 20480}
+	// POST body (per-channel):  {"label":"7880000_usb","max_mb":1024}
+	// POST body (bulk):         {"overall_mb":20480,"channels":{"7880000_usb":1024}}
+	//
+	// max_mb / overall_mb == 0 means unlimited.
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/quota", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			overallMB, chMap := qc.snapshot()
+			writeJSON(w, map[string]interface{}{
+				"overall_mb": overallMB,
+				"channels":   chMap,
+			})
+
+		case http.MethodPost:
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			var raw map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				http.Error(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			if labelRaw, ok := raw["label"]; ok {
+				// Per-channel shorthand: {"label":"...", "max_mb": N}
+				var label string
+				var mb int64
+				if err := json.Unmarshal(labelRaw, &label); err != nil {
+					http.Error(w, "invalid label", http.StatusBadRequest)
+					return
+				}
+				if m, ok := raw["max_mb"]; ok {
+					if err := json.Unmarshal(m, &mb); err != nil {
+						http.Error(w, "invalid max_mb", http.StatusBadRequest)
+						return
+					}
+				}
+				if mb < 0 {
+					http.Error(w, "max_mb must be >= 0", http.StatusBadRequest)
+					return
+				}
+				qc.setForLabel(label, mb)
+				log.Printf("[quota] %s: max_mb=%d", label, mb)
+			} else {
+				// Bulk / overall update
+				if m, ok := raw["overall_mb"]; ok {
+					var mb int64
+					if err := json.Unmarshal(m, &mb); err == nil && mb >= 0 {
+						qc.setOverall(mb)
+						log.Printf("[quota] overall_mb=%d", mb)
+					}
+				}
+				if ch, ok := raw["channels"]; ok {
+					var chMap map[string]int64
+					if err := json.Unmarshal(ch, &chMap); err == nil {
+						for label, mb := range chMap {
+							if mb >= 0 {
+								qc.setForLabel(label, mb)
+							}
+						}
+					}
+				}
+				log.Printf("[quota] bulk update applied")
+			}
+			qc.save(quotaCfgPath)
+			overallMB, chMap := qc.snapshot()
+			writeJSON(w, map[string]interface{}{
+				"overall_mb": overallMB,
+				"channels":   chMap,
+			})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// -----------------------------------------------------------------------
 	// GET /api/status — overall server status
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -1363,14 +1619,19 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			chStatus = append(chStatus, ch.statusSnapshot())
 		}
 
+		overallMB, chQuota := qc.snapshot()
 		writeJSON(w, map[string]interface{}{
 			"total_recordings": total,
 			"channels":         chStatus,
+			"quota": map[string]interface{}{
+				"overall_mb": overallMB,
+				"channels":   chQuota,
+			},
 		})
 	})
 
 	log.Printf("[web] listening on %s", addr)
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, gzipMiddleware(mux))
 }
 
 // writeJSON encodes v as JSON and writes it to w.

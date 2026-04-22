@@ -69,9 +69,18 @@ function playDing() {
   } catch (_) {}
 }
 
+// Today's date in YYYY-MM-DD (local wall-clock, matching what the server uses for UTC).
+// We use UTC here to stay consistent with the server's date bucketing.
+function todayUTC() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+}
+
 let state = {
   offset: 0,
-  label: '',
+  channelId: '', // UUID of the selected channel filter ('' = all channels)
+  date: todayUTC(), // default: today
   total: 0,
   authed: false,
   passwordConfigured: false,
@@ -212,6 +221,87 @@ function loadRetention() {
   }).catch(() => {});
 }
 
+// ── Date filter ───────────────────────────────────────────────────────────────
+
+// Fetch available recording dates from /api/dates and populate the #date-filter
+// <select>.  Dates that have recordings get a bullet prefix so the user can see
+// at a glance which days have data.  The currently-selected date is preserved.
+// loadDates([thenFn]) — refresh the date dropdown, optionally calling thenFn
+// after the date is resolved (so callers that need the correct state.date can
+// wait for it rather than racing with the async fetch).
+function loadDates(thenFn) {
+  // Capture the current selection synchronously from the DOM *before* the async
+  // fetch so that any user interaction that happened between the call and the
+  // promise resolution is not lost.  We also keep state.date in sync below.
+  const sel = document.getElementById('date-filter');
+  const snapshotDate = sel ? sel.value : state.date;
+  // Pass the current channel UUID filter so only dates with recordings for
+  // that channel are shown.  Empty string = all channels.
+  const channelParam = state.channelId ? `?channel_id=${encodeURIComponent(state.channelId)}` : '';
+
+  api('/api/dates' + channelParam).then(d => {
+    if (!sel) return;
+    const available = new Set(d.dates || []);
+
+    // Rebuild options: one option per available date, plus today even if empty.
+    const today = todayUTC();
+    const datesSet = new Set([today, ...available]);
+    // Sort newest-first.
+    const sorted = Array.from(datesSet).sort((a, b) => b.localeCompare(a));
+
+    // Use the DOM snapshot as the value to restore (more reliable than state.date
+    // because it reflects any selection the user made before the fetch resolved).
+    const current = snapshotDate || today;
+
+    // Clear all existing options and rebuild.
+    while (sel.options.length > 0) sel.remove(0);
+
+    sorted.forEach(dateStr => {
+      const opt = document.createElement('option');
+      opt.value = dateStr;
+      // Friendly label: "Today", "Yesterday", or the date string.
+      const diffDays = Math.round((new Date(today) - new Date(dateStr)) / 86400000);
+      let label = dateStr;
+      if (diffDays === 0) label = `Today (${dateStr})`;
+      else if (diffDays === 1) label = `Yesterday (${dateStr})`;
+      // Bullet prefix when there are recordings on that day.
+      opt.textContent = (available.has(dateStr) ? '● ' : '○ ') + label;
+      sel.appendChild(opt);
+    });
+
+    // Restore selection (fall back to today if the previous value is gone).
+    if (Array.from(sel.options).some(o => o.value === current)) {
+      sel.value = current;
+      state.date = current;
+    } else {
+      sel.value = today;
+      state.date = today;
+    }
+
+    if (thenFn) thenFn();
+  }).catch(() => { if (thenFn) thenFn(); });
+}
+
+// ── Quota ─────────────────────────────────────────────────────────────────────
+
+// Cache of {overall_mb, channels:{label:mb}} loaded from /api/quota
+let quotaState = { overall_mb: 0, channels: {} };
+
+function loadQuota() {
+  api('/api/quota').then(d => {
+    quotaState = d || { overall_mb: 0, channels: {} };
+    // Update any already-rendered channel cards
+    document.querySelectorAll('.channel-card[data-label]').forEach(card => {
+      const label = card.dataset.label;
+      const inp = card.querySelector('.ch-quota-input');
+      if (inp) {
+        const mb = (quotaState.channels && quotaState.channels[label]) || 0;
+        inp.value = String(mb);
+      }
+    });
+  }).catch(() => {});
+}
+
 function setChannelRetention(label, hours) {
   if (!state.authed) {
     alert('You must be logged in to change the retention period.');
@@ -254,33 +344,134 @@ function loadChannels() {
   }).catch(e => console.warn('channels:', e));
 }
 
-function renderChannels(channels) {
-  const grid = document.getElementById('channels-grid');
-  const filter = document.getElementById('label-filter');
+// Returns true if a channel card's settings panel is open or the user is
+// actively interacting with it (rename form visible, live player active).
+function channelCardIsActive(card) {
+  if (!card) return false;
+  if (card._livePlayer) return true;
+  const panel = card.querySelector('.sr-settings-panel');
+  if (panel && !panel.classList.contains('hidden')) return true;
+  const renameForm = card.querySelector('.ch-rename-form');
+  if (renameForm && !renameForm.classList.contains('hidden')) return true;
+  return false;
+}
 
-  // Rebuild filter options (add any new labels)
+// Add channels to the #label-filter <select> without removing any existing ones.
+// Each channel is an object {id: UUID, label: string}.
+// The option value is the channel UUID so API calls use stable identifiers.
+// Removal is handled by syncLabelFilter() which is called after recordings load
+// so it can keep channels that have recordings even if the channel is gone.
+function addChannelLabelsToFilter(channels) {
+  const filter = document.getElementById('label-filter');
   const existing = new Set(Array.from(filter.options).map(o => o.value));
   channels.forEach(ch => {
-    if (!existing.has(ch.label)) {
+    // ch may be a plain string (legacy) or {id, label}.
+    const id    = (typeof ch === 'object') ? (ch.id    || ch.label) : ch;
+    const label = (typeof ch === 'object') ? (ch.label || ch.id)   : ch;
+    if (id && !existing.has(id)) {
       const opt = document.createElement('option');
-      opt.value = ch.label;
-      opt.textContent = ch.label;
+      opt.value = id;
+      opt.textContent = label;
       filter.appendChild(opt);
     }
   });
+}
 
-  // Remove filter options for channels that no longer exist
-  const activeLabels = new Set(channels.map(ch => ch.label));
+// Rebuild the #label-filter options to contain exactly the union of active
+// channels and channels present in the current sessions list.
+// activeChannels: array of {id, label} from renderChannels
+// sessionChannels: array of {id, label} from the sessions API response
+// Preserves the current selection (resets to "All" if the selected channel UUID
+// is no longer in either set).
+function syncLabelFilter(activeChannels, sessionChannels) {
+  const filter = document.getElementById('label-filter');
+  // Build a map of id→label for all valid channels.
+  const validIds = new Map();
+  [...activeChannels, ...sessionChannels].forEach(ch => {
+    const id    = (typeof ch === 'object') ? (ch.id    || ch.label) : ch;
+    const label = (typeof ch === 'object') ? (ch.label || ch.id)   : ch;
+    if (id) validIds.set(id, label);
+  });
+  // Remove options that are no longer valid (keep the "All" sentinel).
   Array.from(filter.options).forEach(opt => {
-    if (opt.value && !activeLabels.has(opt.value)) opt.remove();
+    if (opt.value && !validIds.has(opt.value)) opt.remove();
+  });
+  // Add any new channels.
+  addChannelLabelsToFilter(Array.from(validIds.entries()).map(([id, label]) => ({ id, label })));
+  // If the currently-selected channel was removed, reset to "All".
+  if (state.channelId && !validIds.has(state.channelId)) {
+    state.channelId = '';
+    filter.value = '';
+  }
+}
+
+function renderChannels(channels) {
+  const grid = document.getElementById('channels-grid');
+
+  // Add any new channels to the filter (don't remove — syncLabelFilter
+  // handles removal once we also know which channels have recordings).
+  addChannelLabelsToFilter(channels.map(ch => ({ id: ch.channel_id || ch.label, label: ch.label })));
+
+  const activeLabels = new Set(channels.map(ch => ch.label));
+
+  // Remove cards for channels that no longer exist.
+  Array.from(grid.querySelectorAll('.channel-card[data-label]')).forEach(card => {
+    if (!activeLabels.has(card.dataset.label)) card.remove();
   });
 
-  grid.innerHTML = '';
   if (!channels.length) {
     grid.innerHTML = '<div class="empty">No channels configured. Add one above.</div>';
     return;
   }
-  channels.forEach(ch => {
+
+  channels.forEach((ch, idx) => {
+    const existingCard = grid.querySelector(`.channel-card[data-label="${CSS.escape(ch.label)}"]`);
+
+    // If the settings panel is open or user is interacting, do a soft update only.
+    if (existingCard && channelCardIsActive(existingCard)) {
+      // Update only the dynamic parts that don't affect the settings panel.
+      const sr = ch.smart_record || {};
+      const srEnabled = !!sr.enabled;
+      const gateState = ch.smart_record_gate || '';
+      const sched = ch.schedule || {};
+      const schedEnabled = !!sched.enabled;
+      const schedActive = !!ch.schedule_active;
+
+      let statusClass, statusLabel;
+      if (srEnabled) {
+        const gate = gateState || 'idle';
+        const gateLabels = {
+          idle:      ['stopped',   '◌ Idle'],
+          arming:    ['arming',    '◔ Arming'],
+          recording: ['recording', '● Recording'],
+          tail:      ['tail',      '◕ Tail'],
+        };
+        [statusClass, statusLabel] = gateLabels[gate] || ['stopped', gate];
+      } else if (schedEnabled && !schedActive) {
+        statusClass = 'sched-waiting';
+        statusLabel = '⏰ Waiting';
+      } else {
+        statusClass = ch.recording ? 'recording' : (ch.status || 'stopped');
+        statusLabel = ch.recording ? '● Recording' : (ch.status || 'stopped');
+      }
+
+      const statusEl = existingCard.querySelector('.ch-status');
+      if (statusEl) {
+        statusEl.className = `ch-status ${statusClass}`;
+        statusEl.textContent = statusLabel;
+      }
+      const snrEl = existingCard.querySelector('.ch-snr');
+      if (snrEl) snrEl.textContent = 'SNR: ' + fmtSNR(ch.snr);
+
+      // Ensure correct DOM position.
+      const cards = Array.from(grid.querySelectorAll('.channel-card'));
+      if (cards.indexOf(existingCard) !== idx) {
+        const ref = grid.querySelectorAll('.channel-card')[idx];
+        if (ref && ref !== existingCard) grid.insertBefore(existingCard, ref);
+      }
+      return; // skip full rebuild
+    }
+
     const card = document.createElement('div');
     card.className = 'channel-card';
     card.dataset.label = ch.label;
@@ -445,7 +636,17 @@ function renderChannels(channels) {
       wireScheduleEditor(card);
     }
 
-    grid.appendChild(card);
+    // Insert at correct position (or append if no reference card).
+    const refCard = grid.querySelectorAll('.channel-card')[idx] || null;
+    if (refCard && refCard !== existingCard) {
+      grid.insertBefore(card, refCard);
+      if (existingCard) existingCard.remove();
+    } else if (!existingCard) {
+      grid.appendChild(card);
+    } else {
+      grid.insertBefore(card, existingCard);
+      existingCard.remove();
+    }
   });
 }
 
@@ -477,6 +678,9 @@ function buildSmartRecordPanel(ch) {
   if (schedEnabled) recModeVal = 'scheduled';
   else if (enabled) recModeVal = 'smart';
 
+  // Per-channel quota (MB) — 0 means use overall limit
+  const channelQuotaMB = (quotaState.channels && quotaState.channels[ch.label]) || 0;
+
   return `
     <div class="sr-settings-wrap">
       <div class="sr-settings-toggle-row">
@@ -491,6 +695,9 @@ function buildSmartRecordPanel(ch) {
           <input type="range" class="bw-slider sr-bw-slider"
                  min="${cfg.min}" max="${cfg.max}" step="${cfg.step}" value="${bwVal}" />
         </div>
+        <label class="sr-quota-label">Max storage for this channel (MB, 0 = use overall limit)
+          <input type="number" class="ch-quota-input" value="${channelQuotaMB}" min="0" step="1" placeholder="0" />
+        </label>
         <label class="sr-mode-label">Recording mode
           <select class="sr-mode-select">
             <option value="continuous"${recModeVal === 'continuous' ? ' selected' : ''}>Continuous</option>
@@ -731,8 +938,13 @@ function saveSmartRecord(card, label) {
   const bwSlider = card.querySelector('.sr-bw-slider');
   const bwHz = bwSlider ? parseInt(bwSlider.value, 10) : null;
 
+  // Read per-channel quota (MB).
+  const quotaInput = card.querySelector('.ch-quota-input');
+  const maxMB = quotaInput ? parseInt(quotaInput.value, 10) : null;
+
   const patch = { smart_record: srConfig, schedule: schedConfig };
   if (bwHz != null && !isNaN(bwHz)) patch.bandwidth_hz = bwHz;
+  if (maxMB != null && !isNaN(maxMB) && maxMB >= 0) patch.max_mb = maxMB;
 
   api('/api/channels/' + encodeURIComponent(label), {
     method: 'PATCH',
@@ -1032,8 +1244,9 @@ function loadRecordings() {
     limit: PAGE_SIZE,
     offset: state.offset,
     group_by: 'channel',
+    date: state.date, // YYYY-MM-DD; always a specific day (never empty)
   });
-  if (state.label) params.set('label', state.label);
+  if (state.channelId) params.set('channel_id', state.channelId);
 
   // Fetch completed sessions and active (in-progress) segments in parallel.
   Promise.all([
@@ -1041,14 +1254,21 @@ function loadRecordings() {
     api('/api/active').catch(() => []),
   ]).then(([data, active]) => {
     state.total = data.total || 0;
-    const sessions = data.sessions || [];
+    let sessions = data.sessions || [];
+
+    // Exclude live (currently-recording) segments that started on a different
+    // day — they belong to today and should only appear when today is selected.
+    const activeFiltered = (active || []).filter(seg => {
+      const segDate = new Date(seg.started_at).toISOString().slice(0, 10);
+      return segDate === state.date;
+    });
 
     // Merge active segments into their channel-grouped card (or create a synthetic one).
     // Track which channel IDs already have a live segment merged so we don't
     // create a duplicate card for the same channel.
     const mergedChannels = new Set();
-    (active || []).forEach(seg => {
-      if (state.label && seg.label !== state.label) return;
+    activeFiltered.forEach(seg => {
+      if (state.channelId && seg.channel_id !== state.channelId) return;
       // Deduplicate by channel_id (preferred) or label (fallback for old records).
       const dedupeKey = seg.channel_id || seg.label;
       if (mergedChannels.has(dedupeKey)) return;
@@ -1109,6 +1329,18 @@ function loadRecordings() {
 
     renderSessions(sessions);
     renderPagination();
+    // Sync the label filter: keep labels from active channels AND from the
+    // current sessions list so deleted/inactive channels with recordings
+    // remain selectable.
+    // Build {id, label} pairs for active channel cards and for sessions returned
+    // by the API, then sync the filter dropdown to their union.
+    const activeChannels = Array.from(
+      document.querySelectorAll('.channel-card[data-label]')
+    ).map(c => ({ id: c.dataset.channelId || c.dataset.label, label: c.dataset.label }));
+    const sessionChannels = sessions
+      .filter(s => s.label)
+      .map(s => ({ id: s.channel_id || s.label, label: s.label }));
+    syncLabelFilter(activeChannels, sessionChannels);
   }).catch(e => {
     document.getElementById('recordings-list').innerHTML =
       `<div class="empty">Error loading sessions: ${e}</div>`;
@@ -1118,15 +1350,13 @@ function loadRecordings() {
 // Returns true if a session card should be preserved during a refresh.
 // Preserves cards that:
 //   - have audio currently playing or paused-with-position (user has seeked into it)
-//   - have the session player expanded (user is interacting with it)
 //   - have a live player active
+// NOTE: the .session-player panel is always visible (not toggled hidden), so we
+// deliberately do NOT treat its visibility as a signal of user interaction.
 function sessionCardIsActive(card) {
   if (!card) return false;
   // Live audio player active
   if (card._livePlayer) return true;
-  // Session player is expanded (not hidden) — user is interacting
-  const playerDiv = card.querySelector('.session-player');
-  if (playerDiv && !playerDiv.classList.contains('hidden')) return true;
   // Session-level audio has been loaded (src set and metadata available)
   const sessAudio = card.querySelector('.sess-audio');
   if (sessAudio && sessAudio.src && sessAudio.readyState >= 1) return true;
@@ -1152,11 +1382,17 @@ function renderSessions(sessions) {
   // Build set of card keys in the new data.
   const newKeys = new Set(sessions.map(cardKey));
 
-  // Remove cards for sessions that no longer exist (deleted), but only if not active.
+  // Remove cards for sessions that are no longer in the current filtered view.
+  // We always remove cards whose key is absent from the new data — even if the
+  // card has audio loaded — because the user has changed the date/label filter
+  // and stale cards from a different day must not persist.
   let anyRemoved = false;
   Array.from(list.querySelectorAll('.session-card')).forEach(card => {
     const key = card.dataset.channelId || card.dataset.sessionId;
-    if (!newKeys.has(key) && !sessionCardIsActive(card)) {
+    if (!newKeys.has(key)) {
+      // Stop any audio playing on this card before removing it.
+      card.querySelectorAll('audio').forEach(a => { try { a.pause(); a.src = ''; } catch (_) {} });
+      stopPlayheadLoop(card);
       card.remove();
       anyRemoved = true;
     }
@@ -1444,7 +1680,9 @@ function loadSnrTimeline(card, sessionId) {
   const empty   = card.querySelector('.snr-timeline-empty');
   if (!canvas) return;
 
-  api(`/api/sessions/${sessionId}/telemetry`).then(data => {
+  // Pass the current date filter so the telemetry spans only the selected day.
+  const dateParam = state.date !== undefined ? `?date=${encodeURIComponent(state.date)}` : '';
+  api(`/api/sessions/${sessionId}/telemetry${dateParam}`).then(data => {
     // Sort by offset_sec so bars are drawn left-to-right regardless of server order.
     const points = (data.points || [])
       .filter(p => p.snr && p.snr.count > 0)
@@ -1460,11 +1698,11 @@ function loadSnrTimeline(card, sessionId) {
     if (empty) empty.classList.add('hidden');
 
     // Compute the true wall-clock span from the actual segment timestamps.
-    // card._segments is sorted by started_at ascending and excludes live segments.
-    // wallSpanSec = time from first segment start to end of last segment's audio.
+    // Exclude live (in-progress) segments — they have started_at = now and
+    // would inflate wallSpanSec to ~86400 s, breaking the shared time window.
     const startedAt = new Date(data.started_at);
     let wallSpanSec = data.duration_sec; // fallback: sum of audio durations
-    const segs = card._segments || [];
+    const segs = (card._segments || []).filter(s => !s._live);
     if (segs.length > 0) {
       const lastSeg = segs[segs.length - 1];
       const lastSegEnd = new Date(lastSeg.started_at).getTime() + lastSeg.duration_sec * 1000;
@@ -1498,7 +1736,9 @@ function loadSnrTimeline(card, sessionId) {
         const targetMs  = win.startMs + frac * (win.endMs - win.startMs);
         const targetDate = new Date(targetMs);
 
-        const segments = card._segments || [];
+        // Exclude live segments from seek — they have started_at = now and
+        // would cause findSegmentAt to always fall through to the live segment.
+        const segments = (card._segments || []).filter(s => !s._live);
         if (!segments.length) return;
         const result = findSegmentAt(segments, targetDate);
         if (!result) return;
@@ -1639,7 +1879,11 @@ function drawSnrTimeline(canvas, points, startedAt, windowStartMs, windowEndMs) 
 
     let barEndMs;
     if (i < points.length - 1) {
-      barEndMs = cardStartMs + points[i + 1].offset_sec * 1000;
+      const nextPtMs = cardStartMs + points[i + 1].offset_sec * 1000;
+      const gap = nextPtMs - ptMs;
+      // If the gap to the next point is large (> 30 s) this is a recording gap.
+      // Don't extend the bar across the gap — cap it at 10 s (one telemetry interval).
+      barEndMs = gap <= 30000 ? nextPtMs : ptMs + 10000;
     } else {
       barEndMs = ptMs + 10000; // 10 s padding for last bar
     }
@@ -1947,7 +2191,8 @@ function sessLoadSegment(card, seg, offsetSecs) {
 function seekSessionTo(btn) {
   const card     = btn.closest('.session-card');
   const input    = card.querySelector('.sess-seek-input');
-  const segments = card._segments || [];
+  // Exclude live segments — they have started_at = now and break findSegmentAt.
+  const segments = (card._segments || []).filter(s => !s._live);
   if (!segments.length) return;
 
   const target = new Date(input.value);
@@ -1998,9 +2243,33 @@ document.getElementById('refresh-btn').onclick = () => {
   state.offset = 0;
   loadRecordings();
 };
+function clearRecordingsList() {
+  const list = document.getElementById('recordings-list');
+  // Stop any audio and cancel playhead loops before wiping the DOM.
+  Array.from(list.querySelectorAll('.session-card')).forEach(card => {
+    card.querySelectorAll('audio').forEach(a => { try { a.pause(); a.src = ''; } catch (_) {} });
+    stopPlayheadLoop(card);
+    if (card._snrTip) { card._snrTip.style.display = 'none'; }
+  });
+  list.innerHTML = '';
+  _sharedWindowMs = null;
+}
+
 document.getElementById('label-filter').onchange = e => {
-  state.label = e.target.value;
+  state.channelId = e.target.value; // UUID (or '' for all channels)
   state.offset = 0;
+  // Refresh the date dropdown first (scoped to the selected channel), then
+  // load recordings using the resolved state.date so the two filters are
+  // always consistent.
+  clearRecordingsList();
+  loadDates(() => loadRecordings());
+};
+document.getElementById('date-filter').onchange = e => {
+  state.date = e.target.value;
+  state.offset = 0;
+  // Clear the list immediately so stale cards (including live-recording cards
+  // from today) don't persist when switching to a different date.
+  clearRecordingsList();
   loadRecordings();
 };
 
@@ -2036,18 +2305,22 @@ function connectSSE() {
   const es = new EventSource(BASE + '/api/live');
 
   es.addEventListener('recording_saved', e => {
-    // A new segment was saved — reload sessions so the new segment appears.
-    if (state.offset === 0) loadRecordings();
     loadChannels();
+    loadDates(); // refresh date picker in case a new day has started
+    // Only reload recordings when viewing today or all-dates — past dates are
+    // immutable so there is nothing new to show.
+    if (isViewingLiveDate() && state.offset === 0) loadRecordings();
     // Also refresh the SNR timeline for the affected channel card immediately.
-    try {
-      const ev = JSON.parse(e.data);
-      const channelId = ev.data && ev.data.channel_id;
-      if (channelId) {
-        const card = document.querySelector(`.session-card[data-channel-id="${channelId}"]`);
-        if (card) loadSnrTimeline(card, channelId);
-      }
-    } catch (_) {}
+    if (isViewingLiveDate()) {
+      try {
+        const ev = JSON.parse(e.data);
+        const channelId = ev.data && ev.data.channel_id;
+        if (channelId) {
+          const card = document.querySelector(`.session-card[data-channel-id="${channelId}"]`);
+          if (card) loadSnrTimeline(card, channelId);
+        }
+      } catch (_) {}
+    }
   });
 
   es.addEventListener('recording_started', e => {
@@ -2061,8 +2334,8 @@ function connectSSE() {
   });
 
   es.addEventListener('recording_deleted', () => {
-    // Reload sessions to reflect deletion (segment may have been inside a session card).
-    loadRecordings();
+    // Reload sessions to reflect deletion — only matters for live/all-dates view.
+    if (isViewingLiveDate()) loadRecordings();
   });
 
   es.addEventListener('session_deleted', e => {
@@ -2086,16 +2359,23 @@ function connectSSE() {
   es.addEventListener('channel_removed', e => {
     const ev = JSON.parse(e.data);
     const label = ev.data && ev.data.label;
+    const channelId = ev.data && ev.data.channel_id;
     if (label) {
       // Remove card immediately
       const card = document.querySelector(`.channel-card[data-label="${label}"]`);
       if (card) card.remove();
-      // Remove filter option
+      // Remove filter option — options are keyed by UUID (channel_id) when available,
+      // falling back to label for old records without a UUID.
       const filter = document.getElementById('label-filter');
-      Array.from(filter.options).forEach(opt => { if (opt.value === label) opt.remove(); });
-      // If currently filtered to this label, reset
-      if (state.label === label) {
-        state.label = '';
+      Array.from(filter.options).forEach(opt => {
+        if ((channelId && opt.value === channelId) || (!channelId && opt.value === label)) {
+          opt.remove();
+        }
+      });
+      // If currently filtered to this channel, reset to "All"
+      const removedId = channelId || label;
+      if (state.channelId === removedId) {
+        state.channelId = '';
         filter.value = '';
         state.offset = 0;
         loadRecordings();
@@ -2106,7 +2386,7 @@ function connectSSE() {
   es.addEventListener('channel_renamed', () => {
     // Full reload so filter options, card labels, and recordings are consistent
     loadChannels();
-    loadRecordings();
+    if (isViewingLiveDate()) loadRecordings();
   });
 
   es.onerror = () => {
@@ -2237,22 +2517,31 @@ function connectSNRStream() {
   };
 }
 
+// Returns true when the current date filter is today — i.e. the view can
+// contain live/changing data and is worth auto-refreshing.
+function isViewingLiveDate() {
+  return state.date === todayUTC();
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 checkAuth().then(() => {
   loadChannels();
+  loadDates();
   loadRecordings();
   loadRetention();
+  loadQuota();
   connectSSE();
   connectSNRStream();
   // Full channel card refresh every 30 s (structural changes handled by SSE events)
   setInterval(loadChannels, 30000);
-  // Auto-refresh recordings every 60 s without disrupting active playback
-  // (renderSessions preserves cards that have audio playing).
-  setInterval(loadRecordings, 60000);
+  // Auto-refresh recordings every 60 s — skip when viewing a past date because
+  // historical data is immutable and there is nothing new to show.
+  setInterval(() => { if (isViewingLiveDate()) loadRecordings(); }, 60000);
   // Refresh SNR timeline for live session cards every 60 s so the chart
   // stays current while a segment is still being recorded.
   setInterval(() => {
+    if (!isViewingLiveDate()) return;
     document.querySelectorAll('.session-card.session-live').forEach(card => {
       const channelId = card.dataset.channelId;
       if (channelId) loadSnrTimeline(card, channelId);
