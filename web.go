@@ -863,33 +863,84 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				return
 			}
 			// Stream all segments as a single concatenated WAV.
+			// Optional ?start= and ?end= (RFC 3339) restrict the output to a time range.
 			if len(ss.Segments) == 0 {
 				http.Error(w, "no segments", http.StatusNotFound)
 				return
 			}
+
+			// Parse optional time-range query params.
+			var rangeStart, rangeEnd time.Time
+			if s := q.Get("start"); s != "" {
+				rangeStart, _ = time.Parse(time.RFC3339, s)
+			}
+			if e := q.Get("end"); e != "" {
+				rangeEnd, _ = time.Parse(time.RFC3339, e)
+			}
+
 			first := ss.Segments[0]
 			writeStreamingWAVHeader(w, first.SampleRate, first.Channels)
 			flusher, _ := w.(http.Flusher)
 			for _, seg := range ss.Segments {
+				segStart := seg.StartedAt
+				segEnd := segStart.Add(time.Duration(seg.DurationSec * float64(time.Second)))
+
+				// Skip segments entirely outside the requested range.
+				if !rangeStart.IsZero() && segEnd.Before(rangeStart) {
+					continue
+				}
+				if !rangeEnd.IsZero() && segStart.After(rangeEnd) {
+					continue
+				}
+
+				// Compute byte offsets within this segment's PCM data.
+				bytesPerSec := int64(seg.SampleRate) * int64(seg.Channels) * 2 // 16-bit
+				var skipBytes, limitBytes int64
+				if !rangeStart.IsZero() && rangeStart.After(segStart) {
+					offsetSec := rangeStart.Sub(segStart).Seconds()
+					skipBytes = int64(offsetSec * float64(bytesPerSec))
+					// Align to sample frame boundary.
+					skipBytes = (skipBytes / int64(seg.Channels*2)) * int64(seg.Channels*2)
+				}
+				if !rangeEnd.IsZero() && rangeEnd.Before(segEnd) {
+					endOffsetSec := rangeEnd.Sub(segStart).Seconds()
+					endBytes := int64(endOffsetSec * float64(bytesPerSec))
+					endBytes = (endBytes / int64(seg.Channels*2)) * int64(seg.Channels*2)
+					limitBytes = endBytes - skipBytes
+				}
+
 				path := filepath.Join(store.outputDir, seg.Filename)
 				f, err := os.Open(path)
 				if err != nil {
 					log.Printf("[web] session stream: open %s: %v", path, err)
 					continue
 				}
-				// Skip the 44-byte WAV header.
-				if _, err := f.Seek(44, 0); err != nil {
+				// Skip the 44-byte WAV header, then skip any leading PCM bytes.
+				seekTo := int64(44) + skipBytes
+				if _, err := f.Seek(seekTo, 0); err != nil {
 					f.Close()
 					continue
 				}
 				buf := make([]byte, 32*1024)
+				var written int64
 				for {
-					n, err := f.Read(buf)
+					toRead := len(buf)
+					if limitBytes > 0 {
+						remaining := limitBytes - written
+						if remaining <= 0 {
+							break
+						}
+						if int64(toRead) > remaining {
+							toRead = int(remaining)
+						}
+					}
+					n, err := f.Read(buf[:toRead])
 					if n > 0 {
 						if _, werr := w.Write(buf[:n]); werr != nil {
 							f.Close()
 							return
 						}
+						written += int64(n)
 						if flusher != nil {
 							flusher.Flush()
 						}
@@ -912,12 +963,23 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				return
 			}
 			// GET /api/sessions/{id}/mp3 — stream all segments as a single MP3.
+			// Optional ?start= and ?end= (RFC 3339) restrict the output to a time range.
 			// PCM from each segment is piped into lame's stdin; lame's stdout is
 			// written directly to the HTTP response — constant memory, no temp files.
 			if len(ss.Segments) == 0 {
 				http.Error(w, "no segments", http.StatusNotFound)
 				return
 			}
+
+			// Parse optional time-range query params.
+			var mp3RangeStart, mp3RangeEnd time.Time
+			if s := q.Get("start"); s != "" {
+				mp3RangeStart, _ = time.Parse(time.RFC3339, s)
+			}
+			if e := q.Get("end"); e != "" {
+				mp3RangeEnd, _ = time.Parse(time.RFC3339, e)
+			}
+
 			first := ss.Segments[0]
 			mp3Name := strings.ReplaceAll(ss.Label, " ", "_") + "_" + sessionID[:8] + ".mp3"
 
@@ -955,21 +1017,54 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 						return
 					default:
 					}
+
+					segStart := seg.StartedAt
+					segEnd := segStart.Add(time.Duration(seg.DurationSec * float64(time.Second)))
+
+					// Skip segments entirely outside the requested range.
+					if !mp3RangeStart.IsZero() && segEnd.Before(mp3RangeStart) {
+						continue
+					}
+					if !mp3RangeEnd.IsZero() && segStart.After(mp3RangeEnd) {
+						continue
+					}
+
+					// Compute byte offsets within this segment's PCM data.
+					bytesPerSec := int64(seg.SampleRate) * int64(seg.Channels) * 2
+					var skipBytes, limitBytes int64
+					if !mp3RangeStart.IsZero() && mp3RangeStart.After(segStart) {
+						offsetSec := mp3RangeStart.Sub(segStart).Seconds()
+						skipBytes = int64(offsetSec * float64(bytesPerSec))
+						skipBytes = (skipBytes / int64(seg.Channels*2)) * int64(seg.Channels*2)
+					}
+					if !mp3RangeEnd.IsZero() && mp3RangeEnd.Before(segEnd) {
+						endOffsetSec := mp3RangeEnd.Sub(segStart).Seconds()
+						endBytes := int64(endOffsetSec * float64(bytesPerSec))
+						endBytes = (endBytes / int64(seg.Channels*2)) * int64(seg.Channels*2)
+						limitBytes = endBytes - skipBytes
+					}
+
 					f, err := os.Open(filepath.Join(store.outputDir, seg.Filename))
 					if err != nil {
 						log.Printf("[web] session mp3: open %s: %v", seg.Filename, err)
 						continue
 					}
-					// Skip the 44-byte WAV header; pipe only raw PCM.
-					if _, err := f.Seek(44, 0); err != nil {
+					// Skip the 44-byte WAV header plus any leading PCM bytes.
+					seekTo := int64(44) + skipBytes
+					if _, err := f.Seek(seekTo, 0); err != nil {
 						f.Close()
 						continue
 					}
-					if _, err := io.Copy(pw, f); err != nil {
-						f.Close()
-						return // pipe closed (client disconnected or lame exited)
+					var copyErr error
+					if limitBytes > 0 {
+						_, copyErr = io.Copy(pw, io.LimitReader(f, limitBytes))
+					} else {
+						_, copyErr = io.Copy(pw, f)
 					}
 					f.Close()
+					if copyErr != nil {
+						return // pipe closed (client disconnected or lame exited)
+					}
 				}
 			}()
 

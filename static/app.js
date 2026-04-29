@@ -1351,12 +1351,15 @@ function loadRecordings() {
 // Preserves cards that:
 //   - have audio currently playing or paused-with-position (user has seeked into it)
 //   - have a live player active
+//   - have an active time selection (drag zoom) on the SNR chart
 // NOTE: the .session-player panel is always visible (not toggled hidden), so we
 // deliberately do NOT treat its visibility as a signal of user interaction.
 function sessionCardIsActive(card) {
   if (!card) return false;
   // Live audio player active
   if (card._livePlayer) return true;
+  // User has an active time selection on the SNR chart — preserve to avoid losing zoom
+  if (card._timeSelection) return true;
   // Session-level audio has been loaded (src set and metadata available)
   const sessAudio = card.querySelector('.sess-audio');
   if (sessAudio && sessAudio.src && sessAudio.readyState >= 1) return true;
@@ -1461,7 +1464,6 @@ function renderSessionCard(ss, container) {
 
   const liveLabel = ss._live ? '<span class="live-badge">● LIVE</span>' : '';
   // Stream/delete/telemetry all use the card key (channel UUID when available).
-  const streamUrl = `${BASE}/api/sessions/${cardKey}/stream`;
   const deleteBtn = (state.authed && !ss._live)
     ? `<button class="danger-btn" onclick="deleteSession('${cardKey}')">🗑 Delete all</button>`
     : '';
@@ -1469,16 +1471,15 @@ function renderSessionCard(ss, container) {
   // already have at least one completed segment on disk (the stream endpoint
   // serves those; the currently-recording segment is excluded).
   const completedSegCount = (ss.segments || []).filter(s => !s._live).length;
-  const downloadAllWavName = `${ss.label}_${cardKey.slice(0,8)}.wav`;
-  const downloadAllMp3Name = `${ss.label.replace(/[^a-zA-Z0-9_\-]/g, '_')}_${cardKey.slice(0,8)}.mp3`;
-  const mp3StreamUrl = `${BASE}/api/sessions/${cardKey}/mp3`;
-  const dlAllWavOption = state.authed ? `<a href="${streamUrl}" download="${downloadAllWavName}">WAV</a>` : '';
+  // Download All uses dynamic URLs built at click-time so a time-range selection
+  // on the SNR chart is automatically included.  The card key is stored as a
+  // data attribute so the onclick handler can read it.
   const downloadBtn = (!ss._live || completedSegCount > 0)
-    ? `<div class="seg-dl-wrap sess-dl-all-wrap">
+    ? `<div class="seg-dl-wrap sess-dl-all-wrap" data-card-key="${cardKey}" data-label="${ss.label}">
         <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download All ▾</button>
         <div class="seg-dl-menu hidden">
-          ${dlAllWavOption}
-          <a href="${mp3StreamUrl}" download="${downloadAllMp3Name}">MP3</a>
+          ${state.authed ? `<a href="#" class="sess-dl-all-wav" onclick="downloadAllWav(event,this)">WAV</a>` : ''}
+          <a href="#" class="sess-dl-all-mp3" onclick="downloadAllMp3(event,this)">MP3</a>
         </div>
       </div>`
     : '';
@@ -1707,6 +1708,79 @@ function toggleSegPlayer(btn, url) {
   }
 }
 
+// ── Download All helpers (time-range aware) ───────────────────────────────────
+//
+// Build the stream/mp3 URL for a session card, appending ?start=&end= when
+// the card has an active SNR-chart time selection.
+
+function _buildSessionStreamUrl(card, ext) {
+  const wrap = card.querySelector('.sess-dl-all-wrap');
+  const cardKey = wrap ? wrap.dataset.cardKey : (card.dataset.channelId || card.dataset.sessionId);
+  const base = `${BASE}/api/sessions/${cardKey}/${ext}`;
+  const sel = card._timeSelection;
+  if (!sel) return base;
+  return `${base}?start=${encodeURIComponent(new Date(sel.startMs).toISOString())}&end=${encodeURIComponent(new Date(sel.endMs).toISOString())}`;
+}
+
+function downloadAllWav(evt, anchor) {
+  evt.preventDefault();
+  const card = anchor.closest('.session-card');
+  const wrap = anchor.closest('.sess-dl-all-wrap');
+  const label = wrap ? wrap.dataset.label : 'recording';
+  const cardKey = wrap ? wrap.dataset.cardKey : (card.dataset.channelId || card.dataset.sessionId);
+  const url = _buildSessionStreamUrl(card, 'stream');
+  const sel = card._timeSelection;
+  const suffix = sel ? `_${_fmtSelectionSuffix(sel)}` : '';
+  const filename = `${label}_${cardKey.slice(0,8)}${suffix}.wav`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 500);
+  // Close dropdown
+  document.querySelectorAll('.seg-dl-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));
+}
+
+function downloadAllMp3(evt, anchor) {
+  evt.preventDefault();
+  const card = anchor.closest('.session-card');
+  const wrap = anchor.closest('.sess-dl-all-wrap');
+  const label = (wrap ? wrap.dataset.label : 'recording').replace(/[^a-zA-Z0-9_\-]/g, '_');
+  const cardKey = wrap ? wrap.dataset.cardKey : (card.dataset.channelId || card.dataset.sessionId);
+  const url = _buildSessionStreamUrl(card, 'mp3');
+  const sel = card._timeSelection;
+  const suffix = sel ? `_${_fmtSelectionSuffix(sel)}` : '';
+  const filename = `${label}_${cardKey.slice(0,8)}${suffix}.mp3`;
+  // Close dropdown first
+  document.querySelectorAll('.seg-dl-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));
+  fetch(url)
+    .then(r => {
+      if (!r.ok) return r.text().then(t => Promise.reject(t));
+      return r.blob();
+    })
+    .then(blob => {
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(blobUrl); a.remove(); }, 1000);
+    })
+    .catch(e => alert('MP3 download failed: ' + e));
+}
+
+// Format a time selection as a compact string for use in filenames.
+function _fmtSelectionSuffix(sel) {
+  const fmt = ms => {
+    const d = new Date(ms);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  };
+  return `${fmt(sel.startMs)}-${fmt(sel.endMs)}`;
+}
+
 // ── Session timeline player ───────────────────────────────────────────────────
 
 // ── SNR timeline canvas ───────────────────────────────────────────────────────
@@ -1753,6 +1827,14 @@ function recomputeSharedTimeWindow() {
     const canvas = card.querySelector('.snr-timeline');
     if (!tel || !canvas) return;
     drawSnrTimeline(canvas, tel.points, tel.startedAt, _sharedWindowMs.startMs, _sharedWindowMs.endMs);
+    // Re-draw selection overlay if one is active on this card.
+    const sel = card._timeSelection;
+    if (sel) {
+      const totalMs = _sharedWindowMs.endMs - _sharedWindowMs.startMs;
+      const selStartFrac = (sel.startMs - _sharedWindowMs.startMs) / totalMs;
+      const selEndFrac   = (sel.endMs   - _sharedWindowMs.startMs) / totalMs;
+      drawSelectionOverlay(canvas, selStartFrac, selEndFrac);
+    }
     // Redraw playhead if audio is currently playing on this card.
     if (card._currentSegIdx != null) {
       const seg = card._segments && card._segments[card._currentSegIdx];
@@ -1813,61 +1895,64 @@ function loadSnrTimeline(card, sessionId) {
     // Recompute shared window (this also redraws all timelines).
     recomputeSharedTimeWindow();
 
-    // Wire click handler (only once — guard with a flag).
+    // Wire interaction handlers (only once — guard with a flag).
     if (!canvas._handlersWired) {
       canvas._handlersWired = true;
 
-      // Click → seek
-      canvas.onclick = e => {
-        const win = _sharedWindowMs;
-        if (!win) return;
+      // ── Drag-selection state ──────────────────────────────────────────────
+      // _dragStartFrac: fraction where mousedown occurred (null when not dragging)
+      let _dragStartFrac = null;
+      let _isDragging    = false;
+
+      // Helper: convert a canvas-relative clientX to a 0–1 fraction.
+      const toFrac = (clientX) => {
         const rect = canvas.getBoundingClientRect();
-        const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        const windowSec = (win.endMs - win.startMs) / 1000;
-        const targetMs  = win.startMs + frac * (win.endMs - win.startMs);
-        const targetDate = new Date(targetMs);
-
-        // Exclude live segments from seek — they have started_at = now and
-        // would cause findSegmentAt to always fall through to the live segment.
-        const segments = (card._segments || []).filter(s => !s._live);
-        if (!segments.length) return;
-        const result = findSegmentAt(segments, targetDate);
-        if (!result) return;
-
-        // Ensure the session player is visible before seeking.
-        const playerDiv = card.querySelector('.session-player');
-        const header    = card.querySelector('.session-header');
-        if (playerDiv && playerDiv.classList.contains('hidden')) {
-          playerDiv.classList.remove('hidden');
-          if (header) {
-            const toggle = header.querySelector('.sess-toggle');
-            if (toggle) toggle.textContent = '▼';
-          }
-        }
-        sessLoadSegment(card, result.seg, result.offsetSecs);
+        return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       };
 
-      // ── Hover tooltip ────────────────────────────────────────────────────
-      let tip = card._snrTip;
-      if (!tip) {
-        tip = document.createElement('div');
-        tip.className = 'snr-tip';
-        document.body.appendChild(tip);
-        card._snrTip = tip;
-      }
+      // Helper: redraw base chart + current selection overlay (no playhead).
+      const redrawWithSelection = (startFrac, endFrac) => {
+        const tel = card._telemetry;
+        const win = _sharedWindowMs;
+        if (!tel || !win) return;
+        drawSnrTimeline(canvas, tel.points, tel.startedAt, win.startMs, win.endMs);
+        if (startFrac != null && endFrac != null) {
+          drawSelectionOverlay(canvas, startFrac, endFrac);
+        }
+      };
 
+      // ── mousedown — start drag ────────────────────────────────────────────
+      canvas.addEventListener('mousedown', e => {
+        if (e.button !== 0) return; // left button only
+        _dragStartFrac = toFrac(e.clientX);
+        _isDragging    = false;
+        e.preventDefault(); // prevent text selection
+      });
+
+      // ── mousemove — live drag preview ─────────────────────────────────────
       canvas.addEventListener('mousemove', e => {
         const win = _sharedWindowMs;
         const tel = card._telemetry;
         if (!win || !tel) return;
-        const rect = canvas.getBoundingClientRect();
-        const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const frac = toFrac(e.clientX);
+
+        // Live drag preview
+        if (_dragStartFrac != null) {
+          const dist = Math.abs(frac - _dragStartFrac);
+          if (dist > 0.005) {
+            _isDragging = true;
+            redrawWithSelection(_dragStartFrac, frac);
+            // Hide tooltip while dragging
+            if (card._snrTip) card._snrTip.style.display = 'none';
+            return;
+          }
+        }
+
+        // ── Hover tooltip (only when not dragging) ────────────────────────
         const targetMs   = win.startMs + frac * (win.endMs - win.startMs);
         const targetDate = new Date(targetMs);
-        // offset_sec in telemetry is relative to this card's own startedAt
         const targetSec  = (targetMs - tel.startedAt.getTime()) / 1000;
 
-        // Find nearest telemetry point for SNR value.
         const pts = tel.points;
         let nearest = pts[0];
         let bestDist = Math.abs(pts[0].offset_sec - targetSec);
@@ -1880,23 +1965,156 @@ function loadSnrTimeline(card, sessionId) {
         const mm = String(targetDate.getMinutes()).padStart(2, '0');
         const ss = String(targetDate.getSeconds()).padStart(2, '0');
         const snrVal = nearest && nearest.snr ? nearest.snr.avg_db.toFixed(1) + ' dB' : '—';
-        tip.textContent = `${hh}:${mm}:${ss}  SNR ${snrVal}`;
-        tip.style.display = 'block';
-        const tipW = 160;
-        let left = e.clientX - tipW / 2;
-        left = Math.max(4, Math.min(left, window.innerWidth - tipW - 4));
-        tip.style.left = left + 'px';
-        tip.style.top  = (e.clientY - 36) + 'px';
+        let tipText = `${hh}:${mm}:${ss}  SNR ${snrVal}`;
+        if (card._timeSelection) tipText += '  [drag to adjust, dbl-click to reset]';
+        if (card._snrTip) {
+          card._snrTip.textContent = tipText;
+          card._snrTip.style.display = 'block';
+          const tipW = 220;
+          let left = e.clientX - tipW / 2;
+          left = Math.max(4, Math.min(left, window.innerWidth - tipW - 4));
+          card._snrTip.style.left = left + 'px';
+          card._snrTip.style.top  = (e.clientY - 36) + 'px';
+        }
       });
 
-      canvas.addEventListener('mouseleave', () => {
+      // ── mouseup — finalise drag or treat as click ─────────────────────────
+      canvas.addEventListener('mouseup', e => {
+        if (e.button !== 0 || _dragStartFrac == null) return;
+        const endFrac = toFrac(e.clientX);
+        const dist    = Math.abs(endFrac - _dragStartFrac);
+
+        if (_isDragging && dist > 0.005) {
+          // Finalise selection
+          const win = _sharedWindowMs;
+          if (win) {
+            const lo = Math.min(_dragStartFrac, endFrac);
+            const hi = Math.max(_dragStartFrac, endFrac);
+            card._timeSelection = {
+              startMs: win.startMs + lo * (win.endMs - win.startMs),
+              endMs:   win.startMs + hi * (win.endMs - win.startMs),
+            };
+            redrawWithSelection(lo, hi);
+            // Update cursor to indicate selection is active
+            canvas.style.cursor = 'col-resize';
+          }
+        } else {
+          // Plain click — seek (no drag)
+          const win = _sharedWindowMs;
+          if (!win) { _dragStartFrac = null; _isDragging = false; return; }
+          const frac       = toFrac(e.clientX);
+          const targetMs   = win.startMs + frac * (win.endMs - win.startMs);
+          const targetDate = new Date(targetMs);
+          const segments   = (card._segments || []).filter(s => !s._live);
+          if (segments.length) {
+            const result = findSegmentAt(segments, targetDate);
+            if (result) {
+              // Ensure the session player is visible before seeking.
+              const playerDiv = card.querySelector('.session-player');
+              const header    = card.querySelector('.session-header');
+              if (playerDiv && playerDiv.classList.contains('hidden')) {
+                playerDiv.classList.remove('hidden');
+                if (header) {
+                  const toggle = header.querySelector('.sess-toggle');
+                  if (toggle) toggle.textContent = '▼';
+                }
+              }
+              sessLoadSegment(card, result.seg, result.offsetSecs);
+            }
+          }
+        }
+
+        _dragStartFrac = null;
+        _isDragging    = false;
+      });
+
+      // Cancel drag if mouse leaves canvas mid-drag
+      canvas.addEventListener('mouseleave', e => {
+        if (_dragStartFrac != null && _isDragging) {
+          // Snap to edge and finalise
+          const endFrac = e.clientX < canvas.getBoundingClientRect().left ? 0 : 1;
+          const win = _sharedWindowMs;
+          if (win) {
+            const lo = Math.min(_dragStartFrac, endFrac);
+            const hi = Math.max(_dragStartFrac, endFrac);
+            if (hi - lo > 0.005) {
+              card._timeSelection = {
+                startMs: win.startMs + lo * (win.endMs - win.startMs),
+                endMs:   win.startMs + hi * (win.endMs - win.startMs),
+              };
+              redrawWithSelection(lo, hi);
+              canvas.style.cursor = 'col-resize';
+            }
+          }
+        }
+        _dragStartFrac = null;
+        _isDragging    = false;
         if (card._snrTip) card._snrTip.style.display = 'none';
       });
+
+      // ── Double-click — reset selection ────────────────────────────────────
+      canvas.addEventListener('dblclick', () => {
+        card._timeSelection = null;
+        canvas.style.cursor = '';
+        // Redraw without selection overlay
+        const tel = card._telemetry;
+        const win = _sharedWindowMs;
+        if (tel && win) {
+          drawSnrTimeline(canvas, tel.points, tel.startedAt, win.startMs, win.endMs);
+        }
+      });
+
+      // ── Hover tooltip element (created once) ──────────────────────────────
+      if (!card._snrTip) {
+        const tip = document.createElement('div');
+        tip.className = 'snr-tip';
+        document.body.appendChild(tip);
+        card._snrTip = tip;
+      }
+
+      // Set cursor to crosshair to hint drag is available
+      canvas.style.cursor = 'crosshair';
     }
   }).catch(() => {
     canvas.classList.add('hidden');
     if (empty) empty.classList.remove('hidden');
   });
+}
+
+// ── Selection overlay ─────────────────────────────────────────────────────────
+//
+// Draw a semi-transparent blue highlight over the selected time range.
+// Called after drawSnrTimeline() so it overlays the bars.
+// startFrac / endFrac are 0–1 fractions of canvas width.
+function drawSelectionOverlay(canvas, startFrac, endFrac) {
+  if (startFrac == null || endFrac == null) return;
+  const lo = Math.min(startFrac, endFrac);
+  const hi = Math.max(startFrac, endFrac);
+  if (hi - lo < 0.001) return; // too small to draw
+  const W = canvas.width;
+  const H = canvas.height;
+  const AXIS_H = 14;
+  const snrH = H - AXIS_H;
+  const ctx = canvas.getContext('2d');
+  const x0 = lo * W;
+  const x1 = hi * W;
+  // Fill
+  ctx.save();
+  ctx.fillStyle = 'rgba(80,160,255,0.22)';
+  ctx.fillRect(x0, 0, x1 - x0, snrH);
+  // Left boundary
+  ctx.strokeStyle = 'rgba(100,180,255,0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x0, 0);
+  ctx.lineTo(x0, snrH);
+  ctx.stroke();
+  // Right boundary
+  ctx.beginPath();
+  ctx.moveTo(x1, 0);
+  ctx.lineTo(x1, snrH);
+  ctx.stroke();
+  ctx.restore();
 }
 
 // drawSnrTimeline — draw the SNR bar chart on canvas.
@@ -2112,10 +2330,19 @@ function drawPlayhead(card, positionSec, windowSec) {
 
   if (winSec <= 0) return;
 
-  // Redraw the base chart first, then overlay the playhead.
+  // Redraw the base chart first, then overlay the selection and playhead.
   // drawSnrTimeline only resizes the canvas when dimensions actually change,
   // so the coordinate space stays stable across rAF ticks.
   drawSnrTimeline(canvas, tel.points, tel.startedAt, winStartMs, winEndMs);
+
+  // Re-draw selection overlay if one is active on this card.
+  const sel = card._timeSelection;
+  if (sel) {
+    const totalMs = winEndMs - winStartMs;
+    const selStartFrac = (sel.startMs - winStartMs) / totalMs;
+    const selEndFrac   = (sel.endMs   - winStartMs) / totalMs;
+    drawSelectionOverlay(canvas, selStartFrac, selEndFrac);
+  }
 
   if (positionSec == null) return;
 
@@ -2153,19 +2380,28 @@ function startPlayheadLoop(card) {
     const winEndMs   = win ? win.endMs   : (card._telemetry.startedAt.getTime() + card._telemetry.durationSec * 1000);
     const winSec     = Math.max(1, (winEndMs - winStartMs) / 1000);
 
-    const segWallMs      = new Date(seg.started_at).getTime();
+    const segWallMs        = new Date(seg.started_at).getTime();
+    const currentWallMs    = segWallMs + (audio.currentTime || 0) * 1000;
     const segOffsetFromWin = (segWallMs - winStartMs) / 1000;
-    const positionSec    = segOffsetFromWin + (audio.currentTime || 0);
+    const positionSec      = segOffsetFromWin + (audio.currentTime || 0);
     drawPlayhead(card, positionSec, winSec);
 
     // Update the "now playing" time label in real time as audio plays.
     const nowLabel = card.querySelector('.sess-now-playing');
     if (nowLabel) {
-      const currentWallTime = new Date(segWallMs + (audio.currentTime || 0) * 1000);
+      const currentWallTime = new Date(currentWallMs);
       const segMode  = (seg.audio_mode || '').toUpperCase();
       const segLabel = seg.label ? `${seg.label} · ` : '';
       const segFreq  = seg.freq_hz ? `${fmtFreq(seg.freq_hz)} ${segMode} · ` : '';
       nowLabel.textContent = `${segLabel}${segFreq}Seg ${seg.segment_index + 1} — ${fmtDate(currentWallTime)}`;
+    }
+
+    // Auto-stop at the end of the time selection (if one is active).
+    const sel = card._timeSelection;
+    if (sel && !audio.paused && currentWallMs >= sel.endMs) {
+      audio.pause();
+      stopPlayheadLoop(card);
+      return;
     }
 
     if (!audio.paused && !audio.ended) {
@@ -2288,8 +2524,15 @@ function seekSessionTo(btn) {
   const segments = (card._segments || []).filter(s => !s._live);
   if (!segments.length) return;
 
-  const target = new Date(input.value);
+  let target = new Date(input.value);
   if (isNaN(target)) { alert('Invalid date/time'); return; }
+
+  // If a time selection is active, clamp the seek target to within the selection.
+  const sel = card._timeSelection;
+  if (sel) {
+    if (target.getTime() < sel.startMs) target = new Date(sel.startMs);
+    if (target.getTime() > sel.endMs)   target = new Date(sel.endMs);
+  }
 
   const result = findSegmentAt(segments, target);
   if (!result) { alert('No segment found for that time'); return; }
