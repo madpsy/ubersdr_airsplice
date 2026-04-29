@@ -2533,9 +2533,10 @@ function sessLoadSegment(card, seg, offsetSecs) {
   nextBtn.disabled = idx >= segments.length - 1;
 
   // Update the Download Segment button group (WAV + MP3 dropdown).
+  // Hidden when a time selection is active — "Download Selection" replaces it.
   const dlSegWrap = card.querySelector('.sess-dl-seg-wrap');
   if (dlSegWrap) {
-    if (!seg._live && seg.filename) {
+    if (!seg._live && seg.filename && !card._timeSelection) {
       const segUrl  = `${BASE}/api/recordings/${encodeURIComponent(seg.id)}/preview`;
       const segName = seg.filename.replace(/^.*[\\/]/, ''); // basename only
       const wavLink = dlSegWrap.querySelector('.sess-dl-seg-wav');
