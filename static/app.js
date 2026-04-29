@@ -1474,6 +1474,7 @@ function renderSessionCard(ss, container) {
   // Download All uses dynamic URLs built at click-time so a time-range selection
   // on the SNR chart is automatically included.  The card key is stored as a
   // data attribute so the onclick handler can read it.
+  // Download All: MP3 is available to all users; WAV requires auth (raw audio).
   const downloadBtn = (!ss._live || completedSegCount > 0)
     ? `<div class="seg-dl-wrap sess-dl-all-wrap" data-card-key="${cardKey}" data-label="${ss.label}">
         <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download All ▾</button>
@@ -1848,6 +1849,33 @@ function recomputeSharedTimeWindow() {
   });
 }
 
+// Seek to the start of card._timeSelection and begin playback.
+// Called immediately after a drag selection is finalised so the user
+// hears the selected region straight away.
+function _seekToSelectionStart(card) {
+  const sel = card._timeSelection;
+  if (!sel) return;
+  const segments = (card._segments || []).filter(s => !s._live);
+  if (!segments.length) return;
+
+  const targetDate = new Date(sel.startMs);
+  const result = findSegmentAt(segments, targetDate);
+  if (!result) return;
+
+  // Ensure the session player is visible.
+  const playerDiv = card.querySelector('.session-player');
+  const header    = card.querySelector('.session-header');
+  if (playerDiv && playerDiv.classList.contains('hidden')) {
+    playerDiv.classList.remove('hidden');
+    if (header) {
+      const toggle = header.querySelector('.sess-toggle');
+      if (toggle) toggle.textContent = '▼';
+    }
+  }
+
+  sessLoadSegment(card, result.seg, result.offsetSecs);
+}
+
 function loadSnrTimeline(card, sessionId) {
   const canvas  = card.querySelector('.snr-timeline');
   const empty   = card.querySelector('.snr-timeline-empty');
@@ -1985,7 +2013,7 @@ function loadSnrTimeline(card, sessionId) {
         const dist    = Math.abs(endFrac - _dragStartFrac);
 
         if (_isDragging && dist > 0.005) {
-          // Finalise selection
+          // Finalise selection and immediately seek to + play from its start.
           const win = _sharedWindowMs;
           if (win) {
             const lo = Math.min(_dragStartFrac, endFrac);
@@ -1995,8 +2023,9 @@ function loadSnrTimeline(card, sessionId) {
               endMs:   win.startMs + hi * (win.endMs - win.startMs),
             };
             redrawWithSelection(lo, hi);
-            // Update cursor to indicate selection is active
             canvas.style.cursor = 'col-resize';
+            // Seek to the start of the selection and begin playback.
+            _seekToSelectionStart(card);
           }
         } else {
           // Plain click — seek (no drag)
@@ -2044,6 +2073,7 @@ function loadSnrTimeline(card, sessionId) {
               };
               redrawWithSelection(lo, hi);
               canvas.style.cursor = 'col-resize';
+              _seekToSelectionStart(card);
             }
           }
         }

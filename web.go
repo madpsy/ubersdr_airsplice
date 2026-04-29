@@ -958,11 +958,9 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			}
 
 		case r.Method == http.MethodGet && action == "mp3":
-			// Auth required — MP3 is derived from the raw WAV audio.
-			if !requiresAuth(w, r, uiPassword, sessions) {
-				return
-			}
 			// GET /api/sessions/{id}/mp3 — stream all segments as a single MP3.
+			// No auth required — MP3 is a derived format and the original WAV
+			// preview endpoint is also unauthenticated.
 			// Optional ?start= and ?end= (RFC 3339) restrict the output to a time range.
 			// PCM from each segment is piped into lame's stdin; lame's stdout is
 			// written directly to the HTTP response — constant memory, no temp files.
