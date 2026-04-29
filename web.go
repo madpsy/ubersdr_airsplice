@@ -1139,11 +1139,11 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			mp3Name := base + ".mp3"
 
 			// Run lame: read WAV from file, write MP3 to stdout.
-			// -V 4 ≈ 165 kbps VBR — good quality, small file.
+			// -V 6 ≈ 115 kbps VBR — well-suited for voice/SDR narrowband content.
 			// --silent suppresses the progress output on stderr.
 			// The trailing "-" tells lame to write to stdout.
 			cmd := exec.CommandContext(r.Context(),
-				"lame", "--silent", "-V", "4", wavPath, "-",
+				"lame", "--silent", "-V", "6", wavPath, "-",
 			)
 			// Discard lame's stderr so it doesn't leak into the response.
 			cmd.Stderr = nil
