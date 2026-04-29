@@ -1502,6 +1502,7 @@ function renderSessionCard(ss, container) {
       <span class="sess-time">${fmtDate(ss.started_at)}</span>
       <span class="sess-dur">${fmtDuration(ss.duration_sec)}</span>
       <span class="sess-snr">SNR: ${fmtSNR(ss.snr)}</span>
+      <span class="sess-sel-time"></span>
       <span class="sess-count">${ss.segment_count} segment${ss.segment_count !== 1 ? 's' : ''}</span>
     </div>
     <div class="session-actions">
@@ -1894,6 +1895,9 @@ function _updateDownloadButtons(card) {
   const dlAllWrap  = actionsDiv.querySelector('.sess-dl-all-wrap');
   const dlSegWrap  = actionsDiv.querySelector('.sess-dl-seg-wrap');
 
+  // Update the header time-span label.
+  const selTimeSpan = card.querySelector('.sess-sel-time');
+
   if (sel) {
     // Hide the normal buttons.
     if (dlAllWrap) dlAllWrap.classList.add('hidden');
@@ -1929,6 +1933,12 @@ function _updateDownloadButtons(card) {
     dlSelWrap.dataset.cardKey = cardKey;
     dlSelWrap.dataset.label   = label;
     dlSelWrap.classList.remove('hidden');
+
+    // Show selected time range in the header.
+    if (selTimeSpan) {
+      const fmt = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      selTimeSpan.textContent = `${fmt(sel.startMs)} – ${fmt(sel.endMs)}`;
+    }
   } else {
     // Restore normal buttons.
     if (dlAllWrap) dlAllWrap.classList.remove('hidden');
@@ -1936,6 +1946,9 @@ function _updateDownloadButtons(card) {
     // Just remove the selection wrap if it exists.
     const dlSelWrap = actionsDiv.querySelector('.sess-dl-sel-wrap');
     if (dlSelWrap) dlSelWrap.remove();
+
+    // Clear the header time-span label.
+    if (selTimeSpan) selTimeSpan.textContent = '';
   }
 }
 

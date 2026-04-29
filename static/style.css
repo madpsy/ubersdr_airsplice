@@ -312,8 +312,9 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .sess-mode   { color: var(--muted); font-size: 0.8rem; min-width: 40px; }
 .sess-time   { color: var(--muted); font-size: 0.8rem; min-width: 140px; }
 .sess-dur    { color: var(--muted); font-size: 0.8rem; min-width: 60px; }
-.sess-snr    { color: var(--muted); font-size: 0.8rem; min-width: 80px; }
-.sess-count  { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
+.sess-snr      { color: var(--muted); font-size: 0.8rem; min-width: 80px; }
+.sess-sel-time { color: #5b9bd5; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; }
+.sess-count    { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
 
 .session-actions {
   display: flex;
