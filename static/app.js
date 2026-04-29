@@ -1496,10 +1496,10 @@ function renderSessionCard(ss, container) {
     <div class="session-actions">
       ${downloadBtn}
       <div class="seg-dl-wrap sess-dl-seg-wrap hidden">
-        <a href="#" download="" class="seg-dl-main sess-dl-seg-wav">⬇ WAV</a><button class="seg-dl-arrow" onclick="toggleSegDlMenu(this)" aria-label="More download options">▾</button>
+        <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download Segment ▾</button>
         <div class="seg-dl-menu hidden">
-          <a href="#" download="" class="sess-dl-seg-menu-wav">⬇ WAV</a>
-          <button class="sess-dl-seg-mp3" onclick="downloadSegmentMp3(this.dataset.segId, this.dataset.wavFilename)">⬇ MP3</button>
+          <a href="#" download="" class="sess-dl-seg-wav">WAV</a>
+          <button class="sess-dl-seg-mp3" onclick="downloadSegmentMp3(this.dataset.segId, this.dataset.wavFilename)">MP3</button>
         </div>
       </div>
       ${deleteBtn}
@@ -1577,10 +1577,10 @@ function renderSessionCard(ss, container) {
         <div class="seg-actions">
           <button class="play-seg-btn" onclick="toggleSegPlayer(this, '${dlUrl}')">▶</button>
           <div class="seg-dl-wrap">
-            <a href="${dlUrl}" download="${seg.filename}" class="seg-dl-main">⬇ WAV</a><button class="seg-dl-arrow" onclick="toggleSegDlMenu(this)" aria-label="More download options">▾</button>
+            <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download Segment ▾</button>
             <div class="seg-dl-menu hidden">
-              <a href="${dlUrl}" download="${seg.filename}">⬇ WAV</a>
-              <button onclick="downloadSegmentMp3('${seg.id}', '${seg.filename}')">⬇ MP3</button>
+              <a href="${dlUrl}" download="${seg.filename}">WAV</a>
+              <button onclick="downloadSegmentMp3('${seg.id}', '${seg.filename}')">MP3</button>
             </div>
           </div>
           ${delBtn}
@@ -2195,12 +2195,10 @@ function sessLoadSegment(card, seg, offsetSecs) {
     if (!seg._live && seg.filename) {
       const segUrl  = `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
       const segName = seg.filename.replace(/^.*[\\/]/, ''); // basename only
-      const wavLink     = dlSegWrap.querySelector('.sess-dl-seg-wav');
-      const menuWavLink = dlSegWrap.querySelector('.sess-dl-seg-menu-wav');
-      const mp3Btn      = dlSegWrap.querySelector('.sess-dl-seg-mp3');
-      if (wavLink)     { wavLink.href = segUrl; wavLink.download = segName; }
-      if (menuWavLink) { menuWavLink.href = segUrl; menuWavLink.download = segName; }
-      if (mp3Btn)      { mp3Btn.dataset.segId = seg.id; mp3Btn.dataset.wavFilename = seg.filename; }
+      const wavLink = dlSegWrap.querySelector('.sess-dl-seg-wav');
+      const mp3Btn  = dlSegWrap.querySelector('.sess-dl-seg-mp3');
+      if (wavLink) { wavLink.href = segUrl; wavLink.download = segName; }
+      if (mp3Btn)  { mp3Btn.dataset.segId = seg.id; mp3Btn.dataset.wavFilename = seg.filename; }
       dlSegWrap.classList.remove('hidden');
     } else {
       dlSegWrap.classList.add('hidden');

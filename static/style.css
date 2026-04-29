@@ -383,24 +383,11 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   align-items: stretch;
 }
 .seg-dl-wrap .seg-dl-main {
-  border-right: none;
-  border-radius: var(--radius) 0 0 var(--radius);
+  border-radius: var(--radius);
   padding: 2px 8px;
   white-space: nowrap;
 }
-.seg-dl-wrap .seg-dl-arrow {
-  border-left: none;
-  border-radius: 0 var(--radius) var(--radius) 0;
-  padding: 2px 5px;
-  font-size: 0.65rem;
-  line-height: 1;
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  cursor: pointer;
-}
-.seg-dl-wrap .seg-dl-arrow:hover { border-color: var(--accent2); color: var(--accent2); }
-.seg-dl-wrap .seg-dl-main:hover  { border-color: var(--accent2); color: var(--accent2); }
+.seg-dl-wrap .seg-dl-main:hover { border-color: var(--accent2); color: var(--accent2); }
 
 /* Dropdown menu */
 .seg-dl-menu {
