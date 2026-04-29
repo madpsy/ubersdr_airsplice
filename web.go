@@ -388,8 +388,18 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
-	// Serve saved recordings for download.
-	mux.Handle("/recordings/", http.StripPrefix("/recordings/", http.FileServer(http.Dir(store.outputDir))))
+	// Serve saved recordings for download — auth required when a password is set.
+	recFS := http.FileServer(http.Dir(store.outputDir))
+	mux.HandleFunc("/recordings/", func(w http.ResponseWriter, r *http.Request) {
+		if uiPassword != "" {
+			cookie, err := r.Cookie(sessionCookieName)
+			if err != nil || !sessions.valid(cookie.Value) {
+				http.Error(w, "authentication required", http.StatusUnauthorized)
+				return
+			}
+		}
+		http.StripPrefix("/recordings/", recFS).ServeHTTP(w, r)
+	})
 
 	// -----------------------------------------------------------------------
 	// GET  /api/channels        — list all channels and their status
@@ -848,6 +858,10 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 
 		switch {
 		case r.Method == http.MethodGet && action == "stream":
+			// Auth required — WAV files contain raw audio data.
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
 			// Stream all segments as a single concatenated WAV.
 			if len(ss.Segments) == 0 {
 				http.Error(w, "no segments", http.StatusNotFound)
@@ -893,6 +907,10 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			}
 
 		case r.Method == http.MethodGet && action == "mp3":
+			// Auth required — MP3 is derived from the raw WAV audio.
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
 			// GET /api/sessions/{id}/mp3 — stream all segments as a single MP3.
 			// PCM from each segment is piped into lame's stdin; lame's stdout is
 			// written directly to the HTTP response — constant memory, no temp files.

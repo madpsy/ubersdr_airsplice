@@ -1472,11 +1472,12 @@ function renderSessionCard(ss, container) {
   const downloadAllWavName = `${ss.label}_${cardKey.slice(0,8)}.wav`;
   const downloadAllMp3Name = `${ss.label.replace(/[^a-zA-Z0-9_\-]/g, '_')}_${cardKey.slice(0,8)}.mp3`;
   const mp3StreamUrl = `${BASE}/api/sessions/${cardKey}/mp3`;
+  const dlAllWavOption = state.authed ? `<a href="${streamUrl}" download="${downloadAllWavName}">WAV</a>` : '';
   const downloadBtn = (!ss._live || completedSegCount > 0)
     ? `<div class="seg-dl-wrap sess-dl-all-wrap">
         <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download All ▾</button>
         <div class="seg-dl-menu hidden">
-          <a href="${streamUrl}" download="${downloadAllWavName}">WAV</a>
+          ${dlAllWavOption}
           <a href="${mp3StreamUrl}" download="${downloadAllMp3Name}">MP3</a>
         </div>
       </div>`
@@ -1506,7 +1507,7 @@ function renderSessionCard(ss, container) {
       <div class="seg-dl-wrap sess-dl-seg-wrap hidden">
         <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download Segment ▾</button>
         <div class="seg-dl-menu hidden">
-          <a href="#" download="" class="sess-dl-seg-wav">WAV</a>
+          ${state.authed ? '<a href="#" download="" class="sess-dl-seg-wav">WAV</a>' : ''}
           <button class="sess-dl-seg-mp3" onclick="downloadSegmentMp3(this.dataset.segId, this.dataset.wavFilename)">MP3</button>
         </div>
       </div>
@@ -1577,6 +1578,9 @@ function renderSessionCard(ss, container) {
       const delBtn = state.authed
         ? `<button onclick="deleteSegment('${seg.id}')">🗑</button>`
         : '';
+      const segWavOption = state.authed
+        ? `<a href="${dlUrl}" download="${seg.filename}">WAV</a>`
+        : '';
       row.innerHTML = `
         <span class="seg-idx">#${seg.segment_index + 1}</span>
         <span class="seg-time">${fmtDate(seg.started_at)}</span>
@@ -1587,7 +1591,7 @@ function renderSessionCard(ss, container) {
           <div class="seg-dl-wrap">
             <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download Segment ▾</button>
             <div class="seg-dl-menu hidden">
-              <a href="${dlUrl}" download="${seg.filename}">WAV</a>
+              ${segWavOption}
               <button onclick="downloadSegmentMp3('${seg.id}', '${seg.filename}')">MP3</button>
             </div>
           </div>
