@@ -1873,7 +1873,70 @@ function _seekToSelectionStart(card) {
     }
   }
 
+  // Swap download buttons to "Download Selection" mode.
+  _updateDownloadButtons(card);
+
   sessLoadSegment(card, result.seg, result.offsetSecs);
+}
+
+// Update the session-actions download buttons based on whether a time
+// selection is active on the card.
+//
+// Selection active  → hide "Download All" and "Download Segment"; show a
+//                     single "Download Selection" dropdown (WAV + MP3).
+// No selection      → restore "Download All" and "Download Segment"; hide
+//                     "Download Selection".
+function _updateDownloadButtons(card) {
+  const sel        = card._timeSelection;
+  const actionsDiv = card.querySelector('.session-actions');
+  if (!actionsDiv) return;
+
+  const dlAllWrap  = actionsDiv.querySelector('.sess-dl-all-wrap');
+  const dlSegWrap  = actionsDiv.querySelector('.sess-dl-seg-wrap');
+
+  if (sel) {
+    // Hide the normal buttons.
+    if (dlAllWrap) dlAllWrap.classList.add('hidden');
+    if (dlSegWrap) dlSegWrap.classList.add('hidden');
+
+    // Create (or reuse) the "Download Selection" wrap.
+    let dlSelWrap = actionsDiv.querySelector('.sess-dl-sel-wrap');
+    if (!dlSelWrap) {
+      dlSelWrap = document.createElement('div');
+      dlSelWrap.className = 'seg-dl-wrap sess-dl-sel-wrap';
+      // Insert before the delete button (last child) or append.
+      const dangerBtn = actionsDiv.querySelector('.danger-btn');
+      if (dangerBtn) {
+        actionsDiv.insertBefore(dlSelWrap, dangerBtn);
+      } else {
+        actionsDiv.appendChild(dlSelWrap);
+      }
+    }
+
+    // Rebuild its contents (card key / auth state may have changed).
+    const cardKey = card.dataset.channelId || card.dataset.sessionId;
+    const label   = card.querySelector('.sess-label') ? card.querySelector('.sess-label').textContent : 'recording';
+    const wavOption = state.authed
+      ? `<a href="#" class="sess-dl-all-wav" onclick="downloadAllWav(event,this)">WAV</a>`
+      : '';
+    dlSelWrap.innerHTML = `
+      <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download Selection ▾</button>
+      <div class="seg-dl-menu hidden">
+        ${wavOption}
+        <a href="#" class="sess-dl-all-mp3" onclick="downloadAllMp3(event,this)">MP3</a>
+      </div>`;
+    // Store card key on the wrap so the download helpers can find it.
+    dlSelWrap.dataset.cardKey = cardKey;
+    dlSelWrap.dataset.label   = label;
+    dlSelWrap.classList.remove('hidden');
+  } else {
+    // Restore normal buttons.
+    if (dlAllWrap) dlAllWrap.classList.remove('hidden');
+    // dlSegWrap visibility is managed by sessLoadSegment — don't force-show it.
+    // Just remove the selection wrap if it exists.
+    const dlSelWrap = actionsDiv.querySelector('.sess-dl-sel-wrap');
+    if (dlSelWrap) dlSelWrap.remove();
+  }
 }
 
 function loadSnrTimeline(card, sessionId) {
@@ -2092,6 +2155,7 @@ function loadSnrTimeline(card, sessionId) {
         if (tel && win) {
           drawSnrTimeline(canvas, tel.points, tel.startedAt, win.startMs, win.endMs);
         }
+        _updateDownloadButtons(card);
       });
 
       // ── Hover tooltip element (created once) ──────────────────────────────
