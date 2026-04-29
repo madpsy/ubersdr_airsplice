@@ -1574,6 +1574,7 @@ function renderSessionCard(ss, container) {
         </div>`;
     } else {
       const dlUrl = `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
+      const previewUrl = `${BASE}/api/recordings/${encodeURIComponent(seg.id)}/preview`;
       const mp3Url = `${BASE}/api/recordings/${encodeURIComponent(seg.id)}/mp3`;
       const delBtn = state.authed
         ? `<button onclick="deleteSegment('${seg.id}')">🗑</button>`
@@ -1587,7 +1588,7 @@ function renderSessionCard(ss, container) {
         <span class="seg-dur">${fmtDuration(seg.duration_sec)}</span>
         <span class="seg-snr">SNR: ${fmtSNR(seg.snr)}</span>
         <div class="seg-actions">
-          <button class="play-seg-btn" onclick="toggleSegPlayer(this, '${dlUrl}')">▶</button>
+          <button class="play-seg-btn" onclick="toggleSegPlayer(this, '${previewUrl}')">▶</button>
           <div class="seg-dl-wrap">
             <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download Segment ▾</button>
             <div class="seg-dl-menu hidden">
@@ -2194,7 +2195,7 @@ function sessLoadSegment(card, seg, offsetSecs) {
 
   // Live (in-progress) segments are served via the active-stream endpoint;
   // completed segments are served from the recordings file store.
-  const url = seg._liveStreamUrl || `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
+  const url = seg._liveStreamUrl || `${BASE}/api/recordings/${encodeURIComponent(seg.id)}/preview`;
 
   // Store current index on the card for step buttons.
   card._currentSegIdx = idx;
@@ -2205,7 +2206,7 @@ function sessLoadSegment(card, seg, offsetSecs) {
   const dlSegWrap = card.querySelector('.sess-dl-seg-wrap');
   if (dlSegWrap) {
     if (!seg._live && seg.filename) {
-      const segUrl  = `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
+      const segUrl  = `${BASE}/api/recordings/${encodeURIComponent(seg.id)}/preview`;
       const segName = seg.filename.replace(/^.*[\\/]/, ''); // basename only
       const wavLink = dlSegWrap.querySelector('.sess-dl-seg-wav');
       const mp3Btn  = dlSegWrap.querySelector('.sess-dl-seg-mp3');

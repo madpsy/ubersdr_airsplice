@@ -1175,8 +1175,9 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 	})
 
 	// -----------------------------------------------------------------------
-	// DELETE /api/recordings/{id}        — delete a segment (auth required)
-	// GET    /api/recordings/{id}/mp3    — transcode WAV→MP3 via ffmpeg
+	// DELETE /api/recordings/{id}         — delete a segment (auth required)
+	// GET    /api/recordings/{id}/preview — serve WAV for playback (no auth, no download header)
+	// GET    /api/recordings/{id}/mp3     — transcode WAV→MP3 (auth required)
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/recordings/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/api/recordings/")
@@ -1204,8 +1205,44 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			hub.broadcast(sseEvent{Event: "recording_deleted", Data: map[string]string{"id": id}})
 			writeJSON(w, map[string]string{"status": "deleted", "id": id})
 
+		case r.Method == http.MethodGet && action == "preview":
+			// GET /api/recordings/{id}/preview — serve WAV for in-browser playback.
+			// No auth required; no Content-Disposition header so the browser plays
+			// rather than downloads. Uses http.ServeContent for Range/seek support.
+			store.mu.RLock()
+			var rec *recordingRecord
+			for _, r2 := range store.records {
+				if r2.ID == id {
+					rec = r2
+					break
+				}
+			}
+			store.mu.RUnlock()
+			if rec == nil {
+				http.Error(w, "recording not found", http.StatusNotFound)
+				return
+			}
+			wavPath := filepath.Join(store.outputDir, rec.Filename)
+			f, err := os.Open(wavPath)
+			if err != nil {
+				http.Error(w, "file not found", http.StatusNotFound)
+				return
+			}
+			defer f.Close()
+			fi, err := f.Stat()
+			if err != nil {
+				http.Error(w, "stat error", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "audio/wav")
+			http.ServeContent(w, r, rec.Filename, fi.ModTime(), f)
+
 		case r.Method == http.MethodGet && action == "mp3":
-			// GET /api/recordings/{id}/mp3 — transcode WAV→MP3 on-the-fly via ffmpeg.
+			// GET /api/recordings/{id}/mp3 — transcode WAV→MP3 on-the-fly via lame.
+			// Auth required — MP3 is derived from the raw WAV audio.
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
 			// Resolve the recording record to get the filename.
 			store.mu.RLock()
 			var rec *recordingRecord
