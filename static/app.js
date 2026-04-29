@@ -1526,6 +1526,7 @@ function renderSessionCard(ss, container) {
         <input type="datetime-local" class="sess-seek-input"
                min="${dtMin}" max="${dtMax}" value="${dtDef}" step="1" />
         <button class="sess-seek-btn" onclick="seekSessionTo(this)">▶ Go</button>
+        <label class="sess-play-on-click-label"><input type="checkbox" class="sess-play-on-click"> Play on click</label>
         <span class="sess-now-playing"></span>
       </div>
       <div class="sess-player-controls">
@@ -2088,8 +2089,11 @@ function loadSnrTimeline(card, sessionId) {
         const endFrac = toFrac(e.clientX);
         const dist    = Math.abs(endFrac - _dragStartFrac);
 
+        const playOnClick = card.querySelector('.sess-play-on-click');
+        const autoPlay    = playOnClick && playOnClick.checked;
+
         if (_isDragging && dist > 0.005) {
-          // Finalise selection and immediately seek to + play from its start.
+          // Finalise selection; seek + play only when "Play on click" is enabled.
           const win = _sharedWindowMs;
           if (win) {
             const lo = Math.min(_dragStartFrac, endFrac);
@@ -2100,11 +2104,12 @@ function loadSnrTimeline(card, sessionId) {
             };
             redrawWithSelection(lo, hi);
             canvas.style.cursor = 'col-resize';
-            // Seek to the start of the selection and begin playback.
-            _seekToSelectionStart(card);
+            _updateDownloadButtons(card);
+            if (autoPlay) _seekToSelectionStart(card);
           }
         } else {
-          // Plain click — seek (no drag)
+          // Plain click — seek only when "Play on click" is enabled.
+          if (!autoPlay) { _dragStartFrac = null; _isDragging = false; return; }
           const win = _sharedWindowMs;
           if (!win) { _dragStartFrac = null; _isDragging = false; return; }
           const frac       = toFrac(e.clientX);
@@ -2149,7 +2154,9 @@ function loadSnrTimeline(card, sessionId) {
               };
               redrawWithSelection(lo, hi);
               canvas.style.cursor = 'col-resize';
-              _seekToSelectionStart(card);
+              _updateDownloadButtons(card);
+              const playOnClick = card.querySelector('.sess-play-on-click');
+              if (playOnClick && playOnClick.checked) _seekToSelectionStart(card);
             }
           }
         }

@@ -463,6 +463,17 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   font-size: 0.82rem;
 }
 .sess-seek-btn:hover { opacity: 0.85; }
+.sess-play-on-click-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  margin-left: 4px;
+}
+.sess-play-on-click-label input { cursor: pointer; }
 .sess-now-playing {
   color: var(--muted);
   font-size: 0.78rem;
