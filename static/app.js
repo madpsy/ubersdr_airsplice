@@ -1854,7 +1854,8 @@ function recomputeSharedTimeWindow() {
 // Seek to the start of card._timeSelection and begin playback.
 // Called immediately after a drag selection is finalised so the user
 // hears the selected region straight away.
-function _seekToSelectionStart(card) {
+// autoPlay (default true) — when false, loads/seeks but does not start playback.
+function _seekToSelectionStart(card, autoPlay = true) {
   const sel = card._timeSelection;
   if (!sel) return;
   const segments = (card._segments || []).filter(s => !s._live);
@@ -1878,7 +1879,7 @@ function _seekToSelectionStart(card) {
   // Swap download buttons to "Download Selection" mode.
   _updateDownloadButtons(card);
 
-  sessLoadSegment(card, result.seg, result.offsetSecs);
+  sessLoadSegment(card, result.seg, result.offsetSecs, { autoPlay });
 }
 
 // Update the session-actions download buttons based on whether a time
@@ -2093,7 +2094,7 @@ function loadSnrTimeline(card, sessionId) {
         const autoPlay    = playOnClick && playOnClick.checked;
 
         if (_isDragging && dist > 0.005) {
-          // Finalise selection; seek + play only when "Play on click" is enabled.
+          // Finalise selection; always seek to start, play only when autoPlay.
           const win = _sharedWindowMs;
           if (win) {
             const lo = Math.min(_dragStartFrac, endFrac);
@@ -2104,12 +2105,10 @@ function loadSnrTimeline(card, sessionId) {
             };
             redrawWithSelection(lo, hi);
             canvas.style.cursor = 'col-resize';
-            _updateDownloadButtons(card);
-            if (autoPlay) _seekToSelectionStart(card);
+            _seekToSelectionStart(card, autoPlay);
           }
         } else {
-          // Plain click — seek only when "Play on click" is enabled.
-          if (!autoPlay) { _dragStartFrac = null; _isDragging = false; return; }
+          // Plain click — always seek; play only when autoPlay.
           const win = _sharedWindowMs;
           if (!win) { _dragStartFrac = null; _isDragging = false; return; }
           const frac       = toFrac(e.clientX);
@@ -2129,7 +2128,7 @@ function loadSnrTimeline(card, sessionId) {
                   if (toggle) toggle.textContent = '▼';
                 }
               }
-              sessLoadSegment(card, result.seg, result.offsetSecs);
+              sessLoadSegment(card, result.seg, result.offsetSecs, { autoPlay });
             }
           }
         }
@@ -2154,9 +2153,9 @@ function loadSnrTimeline(card, sessionId) {
               };
               redrawWithSelection(lo, hi);
               canvas.style.cursor = 'col-resize';
-              _updateDownloadButtons(card);
               const playOnClick = card.querySelector('.sess-play-on-click');
-              if (playOnClick && playOnClick.checked) _seekToSelectionStart(card);
+              const autoPlay    = playOnClick && playOnClick.checked;
+              _seekToSelectionStart(card, autoPlay);
             }
           }
         }
@@ -2535,7 +2534,9 @@ function stopPlayheadLoop(card) {
 }
 
 // Load a segment into the session player and seek to offsetSecs.
-function sessLoadSegment(card, seg, offsetSecs) {
+// opts.autoPlay (default true) — when false, loads/seeks but does not call audio.play().
+function sessLoadSegment(card, seg, offsetSecs, opts = {}) {
+  const autoPlay = opts.autoPlay !== false;
   const audio    = card.querySelector('.sess-audio');
   const nowLabel = card.querySelector('.sess-now-playing');
   const prevBtn  = card.querySelector('.sess-prev-btn');
@@ -2612,11 +2613,11 @@ function sessLoadSegment(card, seg, offsetSecs) {
     } else {
       audio.currentTime = 0;
     }
-    audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+    if (autoPlay) audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
   } else if (alreadyLoaded) {
     // Same completed file already loaded with metadata — seek directly.
     audio.currentTime = Math.min(offsetSecs, isFinite(audio.duration) ? audio.duration - 0.1 : offsetSecs);
-    audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+    if (autoPlay) audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
   } else {
     // Different file (or live segment) — set src and wait for metadata before seeking.
     audio.src = url;
@@ -2624,7 +2625,7 @@ function sessLoadSegment(card, seg, offsetSecs) {
       if (offsetSecs > 0) {
         audio.currentTime = Math.min(offsetSecs, isFinite(audio.duration) ? audio.duration - 0.1 : offsetSecs);
       }
-      audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+      if (autoPlay) audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
     }, { once: true });
     // Trigger load so loadedmetadata fires (preload="none" won't load otherwise).
     audio.load();
