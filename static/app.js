@@ -1525,6 +1525,16 @@ function renderSessionCard(ss, container) {
     .slice()
     .sort((a, b) => new Date(a.started_at) - new Date(b.started_at));
 
+  // Wire seeked/play listeners on the session audio element so the playhead
+  // loop restarts after a native seek-bar drag or play-after-pause.
+  const sessAudio = card.querySelector('.sess-audio');
+  if (sessAudio) {
+    sessAudio.addEventListener('seeked', () => {
+      if (!sessAudio.paused) startPlayheadLoop(card);
+    });
+    sessAudio.addEventListener('play', () => startPlayheadLoop(card));
+  }
+
   // Populate segments
   const segContainer = card.querySelector('.session-segments');
   (ss.segments || []).forEach(seg => {
