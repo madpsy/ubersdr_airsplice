@@ -359,7 +359,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .seg-time { color: var(--muted); font-size: 0.8rem; min-width: 140px; }
 .seg-dur  { color: var(--muted); font-size: 0.8rem; min-width: 60px; }
 .seg-snr  { color: var(--muted); font-size: 0.8rem; min-width: 80px; }
-.seg-actions { margin-left: auto; display: flex; gap: 6px; }
+.seg-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
 .seg-actions a,
 .seg-actions button {
   background: transparent;
@@ -375,6 +375,69 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .seg-actions a:hover { border-color: var(--accent2); color: var(--accent2); }
 .seg-actions button:hover { border-color: var(--accent); color: var(--accent); }
 .seg-actions button.play-seg-btn { min-width: 28px; text-align: center; }
+
+/* ── Segment download split-button (WAV | ▾ → WAV / MP3) ── */
+.seg-dl-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+.seg-dl-wrap .seg-dl-main {
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.seg-dl-wrap .seg-dl-arrow {
+  border-left: none;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 2px 5px;
+  font-size: 0.65rem;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+}
+.seg-dl-wrap .seg-dl-arrow:hover { border-color: var(--accent2); color: var(--accent2); }
+.seg-dl-wrap .seg-dl-main:hover  { border-color: var(--accent2); color: var(--accent2); }
+
+/* Dropdown menu */
+.seg-dl-menu {
+  position: absolute;
+  top: calc(100% + 3px);
+  right: 0;
+  z-index: 200;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 100px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.seg-dl-menu.hidden { display: none; }
+.seg-dl-menu a,
+.seg-dl-menu button {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  font-size: 0.75rem;
+  padding: 6px 12px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+}
+.seg-dl-menu a:hover,
+.seg-dl-menu button:hover {
+  background: rgba(79,142,247,0.12);
+  color: var(--accent2);
+}
 
 /* ── Session timeline player ── */
 .session-player {

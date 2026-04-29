@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1084,27 +1085,86 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 	})
 
 	// -----------------------------------------------------------------------
-	// DELETE /api/recordings/{id}
+	// DELETE /api/recordings/{id}        — delete a segment (auth required)
+	// GET    /api/recordings/{id}/mp3    — transcode WAV→MP3 via ffmpeg
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/recordings/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+		rest := strings.TrimPrefix(r.URL.Path, "/api/recordings/")
+		parts := strings.SplitN(rest, "/", 2)
+		id := parts[0]
+		action := ""
+		if len(parts) == 2 {
+			action = parts[1]
 		}
-		if !requiresAuth(w, r, uiPassword, sessions) {
-			return
-		}
-		id := strings.TrimPrefix(r.URL.Path, "/api/recordings/")
 		if id == "" {
 			http.Error(w, "missing id", http.StatusBadRequest)
 			return
 		}
-		if err := store.delete(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
+
+		switch {
+		case r.Method == http.MethodDelete && action == "":
+			// DELETE /api/recordings/{id}
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
+			if err := store.delete(id); err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			hub.broadcast(sseEvent{Event: "recording_deleted", Data: map[string]string{"id": id}})
+			writeJSON(w, map[string]string{"status": "deleted", "id": id})
+
+		case r.Method == http.MethodGet && action == "mp3":
+			// GET /api/recordings/{id}/mp3 — transcode WAV→MP3 on-the-fly via ffmpeg.
+			// Resolve the recording record to get the filename.
+			store.mu.RLock()
+			var rec *recordingRecord
+			for _, r2 := range store.records {
+				if r2.ID == id {
+					rec = r2
+					break
+				}
+			}
+			store.mu.RUnlock()
+
+			if rec == nil {
+				http.Error(w, "recording not found", http.StatusNotFound)
+				return
+			}
+
+			wavPath := filepath.Join(store.outputDir, rec.Filename)
+
+			// Build the download filename: same base name but .mp3 extension.
+			base := strings.TrimSuffix(filepath.Base(rec.Filename), filepath.Ext(rec.Filename))
+			mp3Name := base + ".mp3"
+
+			// Run lame: read WAV from file, write MP3 to stdout.
+			// -V 4 ≈ 165 kbps VBR — good quality, small file.
+			// --silent suppresses the progress output on stderr.
+			// The trailing "-" tells lame to write to stdout.
+			cmd := exec.CommandContext(r.Context(),
+				"lame", "--silent", "-V", "4", wavPath, "-",
+			)
+			// Discard lame's stderr so it doesn't leak into the response.
+			cmd.Stderr = nil
+
+			mp3Data, err := cmd.Output()
+			if err != nil {
+				log.Printf("[web] ffmpeg mp3 encode %s: %v", id, err)
+				http.Error(w, "MP3 encoding failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Disposition", `attachment; filename="`+mp3Name+`"`)
+			w.Header().Set("Content-Length", strconv.Itoa(len(mp3Data)))
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(mp3Data)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-		hub.broadcast(sseEvent{Event: "recording_deleted", Data: map[string]string{"id": id}})
-		writeJSON(w, map[string]string{"status": "deleted", "id": id})
 	})
 
 	// -----------------------------------------------------------------------

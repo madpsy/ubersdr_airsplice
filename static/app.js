@@ -1469,8 +1469,9 @@ function renderSessionCard(ss, container) {
   // already have at least one completed segment on disk (the stream endpoint
   // serves those; the currently-recording segment is excluded).
   const completedSegCount = (ss.segments || []).filter(s => !s._live).length;
+  const downloadAllWavName = `${ss.label}_${cardKey.slice(0,8)}.wav`;
   const downloadBtn = (!ss._live || completedSegCount > 0)
-    ? `<a href="${streamUrl}" download="${ss.label}_${cardKey.slice(0,8)}.wav">⬇ Download All</a>`
+    ? `<a href="${streamUrl}" download="${downloadAllWavName}">⬇ Download All</a>`
     : '';
 
   // Build datetime-local default value from session start
@@ -1494,7 +1495,13 @@ function renderSessionCard(ss, container) {
     </div>
     <div class="session-actions">
       ${downloadBtn}
-      <a class="sess-dl-seg hidden" href="#" download="">⬇ Download Segment</a>
+      <div class="seg-dl-wrap sess-dl-seg-wrap hidden">
+        <a href="#" download="" class="seg-dl-main sess-dl-seg-wav">⬇ WAV</a><button class="seg-dl-arrow" onclick="toggleSegDlMenu(this)" aria-label="More download options">▾</button>
+        <div class="seg-dl-menu hidden">
+          <a href="#" download="" class="sess-dl-seg-menu-wav">⬇ WAV</a>
+          <button class="sess-dl-seg-mp3" onclick="downloadSegmentMp3(this.dataset.segId, this.dataset.wavFilename)">⬇ MP3</button>
+        </div>
+      </div>
       ${deleteBtn}
     </div>
     <div class="session-player">
@@ -1558,6 +1565,7 @@ function renderSessionCard(ss, container) {
         </div>`;
     } else {
       const dlUrl = `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
+      const mp3Url = `${BASE}/api/recordings/${encodeURIComponent(seg.id)}/mp3`;
       const delBtn = state.authed
         ? `<button onclick="deleteSegment('${seg.id}')">🗑</button>`
         : '';
@@ -1568,7 +1576,13 @@ function renderSessionCard(ss, container) {
         <span class="seg-snr">SNR: ${fmtSNR(seg.snr)}</span>
         <div class="seg-actions">
           <button class="play-seg-btn" onclick="toggleSegPlayer(this, '${dlUrl}')">▶</button>
-          <a href="${dlUrl}" download="${seg.filename}">⬇ WAV</a>
+          <div class="seg-dl-wrap">
+            <a href="${dlUrl}" download="${seg.filename}" class="seg-dl-main">⬇ WAV</a><button class="seg-dl-arrow" onclick="toggleSegDlMenu(this)" aria-label="More download options">▾</button>
+            <div class="seg-dl-menu hidden">
+              <a href="${dlUrl}" download="${seg.filename}">⬇ WAV</a>
+              <button onclick="downloadSegmentMp3('${seg.id}', '${seg.filename}')">⬇ MP3</button>
+            </div>
+          </div>
           ${delBtn}
         </div>
         <div class="seg-player hidden">
@@ -1598,6 +1612,60 @@ function toggleSessionPlayer(btn, sessionId) {
     audio.pause();
     audio.currentTime = 0;
   }
+}
+
+// Toggle the per-segment download format dropdown.
+// Closes any other open dropdown first.
+function toggleSegDlMenu(btn) {
+  const wrap = btn.closest('.seg-dl-wrap');
+  const menu = wrap.querySelector('.seg-dl-menu');
+  const isOpen = !menu.classList.contains('hidden');
+
+  // Close all other open menus.
+  document.querySelectorAll('.seg-dl-menu:not(.hidden)').forEach(m => {
+    if (m !== menu) m.classList.add('hidden');
+  });
+
+  menu.classList.toggle('hidden', isOpen);
+
+  // Close when clicking outside.
+  if (!isOpen) {
+    const close = e => {
+      if (!wrap.contains(e.target)) {
+        menu.classList.add('hidden');
+        document.removeEventListener('click', close, true);
+      }
+    };
+    // Use capture so the listener fires before the button's own click.
+    setTimeout(() => document.addEventListener('click', close, true), 0);
+  }
+}
+
+// Fetch the MP3 for a segment and trigger a browser download.
+// Uses a temporary <a> element so the browser saves the file rather than
+// navigating to it (fetch + createObjectURL gives us a proper filename).
+function downloadSegmentMp3(segId, wavFilename) {
+  // Close any open dropdown.
+  document.querySelectorAll('.seg-dl-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));
+
+  const mp3Url = `${BASE}/api/recordings/${encodeURIComponent(segId)}/mp3`;
+  const mp3Name = wavFilename.replace(/\.wav$/i, '.mp3').replace(/^.*[\\/]/, '');
+
+  fetch(mp3Url)
+    .then(r => {
+      if (!r.ok) return r.text().then(t => Promise.reject(t));
+      return r.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = mp3Name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    })
+    .catch(e => alert('MP3 download failed: ' + e));
 }
 
 function toggleSegPlayer(btn, url) {
@@ -2121,17 +2189,21 @@ function sessLoadSegment(card, seg, offsetSecs) {
   prevBtn.disabled = idx <= 0;
   nextBtn.disabled = idx >= segments.length - 1;
 
-  // Update the Download Segment button.
-  const dlSegBtn = card.querySelector('.sess-dl-seg');
-  if (dlSegBtn) {
+  // Update the Download Segment button group (WAV + MP3 dropdown).
+  const dlSegWrap = card.querySelector('.sess-dl-seg-wrap');
+  if (dlSegWrap) {
     if (!seg._live && seg.filename) {
-      const segUrl = `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
+      const segUrl  = `${BASE}/recordings/${encodeURIComponent(seg.filename)}`;
       const segName = seg.filename.replace(/^.*[\\/]/, ''); // basename only
-      dlSegBtn.href     = segUrl;
-      dlSegBtn.download = segName;
-      dlSegBtn.classList.remove('hidden');
+      const wavLink     = dlSegWrap.querySelector('.sess-dl-seg-wav');
+      const menuWavLink = dlSegWrap.querySelector('.sess-dl-seg-menu-wav');
+      const mp3Btn      = dlSegWrap.querySelector('.sess-dl-seg-mp3');
+      if (wavLink)     { wavLink.href = segUrl; wavLink.download = segName; }
+      if (menuWavLink) { menuWavLink.href = segUrl; menuWavLink.download = segName; }
+      if (mp3Btn)      { mp3Btn.dataset.segId = seg.id; mp3Btn.dataset.wavFilename = seg.filename; }
+      dlSegWrap.classList.remove('hidden');
     } else {
-      dlSegBtn.classList.add('hidden');
+      dlSegWrap.classList.add('hidden');
     }
   }
 
