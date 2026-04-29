@@ -1471,7 +1471,13 @@ function renderSessionCard(ss, container) {
   const completedSegCount = (ss.segments || []).filter(s => !s._live).length;
   const downloadAllWavName = `${ss.label}_${cardKey.slice(0,8)}.wav`;
   const downloadBtn = (!ss._live || completedSegCount > 0)
-    ? `<a href="${streamUrl}" download="${downloadAllWavName}">⬇ Download All</a>`
+    ? `<div class="seg-dl-wrap sess-dl-all-wrap">
+        <button class="seg-dl-main" onclick="toggleSegDlMenu(this)">⬇ Download All ▾</button>
+        <div class="seg-dl-menu hidden">
+          <a href="${streamUrl}" download="${downloadAllWavName}">WAV</a>
+          <button onclick="downloadSessionMp3('${cardKey}', '${ss.label}')">MP3</button>
+        </div>
+      </div>`
     : '';
 
   // Build datetime-local default value from session start
@@ -1650,6 +1656,33 @@ function downloadSegmentMp3(segId, wavFilename) {
 
   const mp3Url = `${BASE}/api/recordings/${encodeURIComponent(segId)}/mp3`;
   const mp3Name = wavFilename.replace(/\.wav$/i, '.mp3').replace(/^.*[\\/]/, '');
+
+  fetch(mp3Url)
+    .then(r => {
+      if (!r.ok) return r.text().then(t => Promise.reject(t));
+      return r.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = mp3Name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    })
+    .catch(e => alert('MP3 download failed: ' + e));
+}
+
+// Fetch the MP3 for an entire session (all segments concatenated) and trigger
+// a browser download. The backend streams PCM → lame → HTTP so memory usage
+// on the server is constant regardless of session size.
+function downloadSessionMp3(sessionId, label) {
+  // Close any open dropdown.
+  document.querySelectorAll('.seg-dl-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));
+
+  const mp3Url  = `${BASE}/api/sessions/${encodeURIComponent(sessionId)}/mp3`;
+  const mp3Name = label.replace(/[^a-zA-Z0-9_\-]/g, '_') + '_' + sessionId.slice(0, 8) + '.mp3';
 
   fetch(mp3Url)
     .then(r => {

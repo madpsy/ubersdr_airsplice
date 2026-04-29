@@ -892,6 +892,78 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				}
 			}
 
+		case r.Method == http.MethodGet && action == "mp3":
+			// GET /api/sessions/{id}/mp3 — stream all segments as a single MP3.
+			// PCM from each segment is piped into lame's stdin; lame's stdout is
+			// written directly to the HTTP response — constant memory, no temp files.
+			if len(ss.Segments) == 0 {
+				http.Error(w, "no segments", http.StatusNotFound)
+				return
+			}
+			first := ss.Segments[0]
+			mp3Name := strings.ReplaceAll(ss.Label, " ", "_") + "_" + sessionID[:8] + ".mp3"
+
+			// lame channel mode: m=mono, s=stereo.
+			chMode := "s"
+			if first.Channels == 1 {
+				chMode = "m"
+			}
+
+			cmd := exec.CommandContext(r.Context(),
+				"lame", "--silent",
+				"-r",                                      // raw PCM input (no WAV header)
+				"-s", fmt.Sprintf("%d", first.SampleRate), // sample rate
+				"--bitwidth", "16", // 16-bit samples
+				"-m", chMode, // channel mode
+				"-V", "6", // VBR ~115 kbps
+				"-", "-", // stdin → stdout
+			)
+			cmd.Stderr = nil
+
+			// Pipe lame's stdout directly to the HTTP response — no buffering.
+			cmd.Stdout = w
+
+			// Feed all segment PCM into lame's stdin via a goroutine.
+			// io.Pipe provides backpressure: the goroutine blocks whenever lame
+			// (and therefore the HTTP response) is not ready to consume more data.
+			pr, pw := io.Pipe()
+			cmd.Stdin = pr
+
+			go func() {
+				defer pw.Close()
+				for _, seg := range ss.Segments {
+					select {
+					case <-r.Context().Done():
+						return
+					default:
+					}
+					f, err := os.Open(filepath.Join(store.outputDir, seg.Filename))
+					if err != nil {
+						log.Printf("[web] session mp3: open %s: %v", seg.Filename, err)
+						continue
+					}
+					// Skip the 44-byte WAV header; pipe only raw PCM.
+					if _, err := f.Seek(44, 0); err != nil {
+						f.Close()
+						continue
+					}
+					if _, err := io.Copy(pw, f); err != nil {
+						f.Close()
+						return // pipe closed (client disconnected or lame exited)
+					}
+					f.Close()
+				}
+			}()
+
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Disposition", `attachment; filename="`+mp3Name+`"`)
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+
+			if err := cmd.Run(); err != nil && r.Context().Err() == nil {
+				log.Printf("[web] session mp3 lame: %v", err)
+			}
+
 		case r.Method == http.MethodGet && action == "telemetry":
 			// Read all .jsonl telemetry files for this session's segments and
 			// return a merged, time-ordered array of SNR/level data points.
