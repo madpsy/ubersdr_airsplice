@@ -2606,6 +2606,16 @@ function sessLoadSegment(card, seg, offsetSecs, opts = {}) {
   const targetPath = new URL(url, location.href).pathname;
   const alreadyLoaded = !seg._live && currentPath === targetPath && audio.readyState >= 1;
 
+  // Helper: draw a static playhead at the seek position (used when autoPlay=false).
+  const drawStaticPlayhead = (actualOffsetSecs) => {
+    const win = _sharedWindowMs;
+    if (!win) return;
+    const segStartMs  = new Date(seg.started_at).getTime();
+    const wallMs      = segStartMs + actualOffsetSecs * 1000;
+    const positionSec = (wallMs - win.startMs) / 1000;
+    drawPlayhead(card, positionSec);
+  };
+
   if (offsetSecs <= 0) {
     // No seek needed — just set src (if changed) and play from the start.
     if (!alreadyLoaded) {
@@ -2613,19 +2623,33 @@ function sessLoadSegment(card, seg, offsetSecs, opts = {}) {
     } else {
       audio.currentTime = 0;
     }
-    if (autoPlay) audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+    if (autoPlay) {
+      audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+    } else {
+      drawStaticPlayhead(0);
+    }
   } else if (alreadyLoaded) {
     // Same completed file already loaded with metadata — seek directly.
-    audio.currentTime = Math.min(offsetSecs, isFinite(audio.duration) ? audio.duration - 0.1 : offsetSecs);
-    if (autoPlay) audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+    const clampedOffset = Math.min(offsetSecs, isFinite(audio.duration) ? audio.duration - 0.1 : offsetSecs);
+    audio.currentTime = clampedOffset;
+    if (autoPlay) {
+      audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+    } else {
+      drawStaticPlayhead(clampedOffset);
+    }
   } else {
     // Different file (or live segment) — set src and wait for metadata before seeking.
     audio.src = url;
     audio.addEventListener('loadedmetadata', () => {
-      if (offsetSecs > 0) {
-        audio.currentTime = Math.min(offsetSecs, isFinite(audio.duration) ? audio.duration - 0.1 : offsetSecs);
+      const clampedOffset = offsetSecs > 0
+        ? Math.min(offsetSecs, isFinite(audio.duration) ? audio.duration - 0.1 : offsetSecs)
+        : 0;
+      if (clampedOffset > 0) audio.currentTime = clampedOffset;
+      if (autoPlay) {
+        audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
+      } else {
+        drawStaticPlayhead(clampedOffset);
       }
-      if (autoPlay) audio.play().then(() => startPlayheadLoop(card)).catch(() => {});
     }, { once: true });
     // Trigger load so loadedmetadata fires (preload="none" won't load otherwise).
     audio.load();
