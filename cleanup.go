@@ -386,6 +386,15 @@ func deleteRecordFiles(store *recordingStore, outputDir string, rec *recordingRe
 		}
 	}
 
+	// Remove JSONL telemetry file.
+	if rec.Filename != "" {
+		base := strings.TrimSuffix(rec.Filename, filepath.Ext(rec.Filename))
+		jsonlPath := filepath.Join(outputDir, base+".jsonl")
+		if err := os.Remove(jsonlPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("cleanup: remove %s: %v", jsonlPath, err)
+		}
+	}
+
 	// Remove JSON sidecar.
 	sidecarRemoved := false
 	if rec.Filename != "" {

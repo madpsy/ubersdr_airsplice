@@ -604,10 +604,11 @@ func (s *recordingStore) delete(id string) error {
 	}
 	s.mu.Unlock()
 
-	// Remove per-segment WAV and JSON sidecar (best-effort).
+	// Remove per-segment WAV, JSON sidecar, and JSONL telemetry file (best-effort).
 	for _, name := range []string{
 		rec.Filename,
 		strings.TrimSuffix(rec.Filename, filepath.Ext(rec.Filename)) + ".json",
+		strings.TrimSuffix(rec.Filename, filepath.Ext(rec.Filename)) + ".jsonl",
 	} {
 		if name == "" {
 			continue
