@@ -5,9 +5,10 @@
 # No host binaries are required.
 #
 # Usage:
-#   ./docker.sh [build|push|run]
+#   ./docker.sh [build|push|run|arm64]
 #
-#   build  — build the image (default)
+#   build  — build the image for linux/amd64 (default)
+#   arm64  — build the image for linux/arm64 (Raspberry Pi, Apple Silicon, etc.)
 #   push   — build then push to registry (set IMAGE env var)
 #   run    — run the image locally (set env vars below)
 #
@@ -104,10 +105,11 @@ run_image() {
 
 case "${1:-build}" in
     build) build ;;
+    arm64) PLATFORM=linux/arm64 build ;;
     push)  push  ;;
     run)   shift; run_image "$@" ;;
     *)
-        echo "Usage: $0 [build|push|run [args...]]" >&2
+        echo "Usage: $0 [build|arm64|push|run [args...]]" >&2
         exit 1
         ;;
 esac
