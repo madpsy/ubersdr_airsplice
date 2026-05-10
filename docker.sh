@@ -7,14 +7,15 @@
 # Usage:
 #   ./docker.sh [build|push|run|arm64]
 #
-#   build  — build the image for linux/amd64 (default)
-#   arm64  — build the image for linux/arm64 (Raspberry Pi, Apple Silicon, etc.)
-#   push   — build then push to registry (set IMAGE env var)
+#   build  — build the image for linux/amd64 (default, local load)
+#   arm64  — build the image for linux/arm64 (Raspberry Pi, Apple Silicon, etc., local load)
+#   push   — build multi-arch (amd64 + arm64) with buildx and push manifest to registry
 #   run    — run the image locally (set env vars below)
 #
 # Environment variables (build):
 #   IMAGE      Docker image name/tag   (default: madpsy/ubersdr_airsplice:latest)
 #   PLATFORM   Docker --platform flag  (default: linux/amd64)
+#   BUILDER    buildx builder name     (default: ubersdr-multiarch)
 
 set -euo pipefail
 
@@ -22,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 IMAGE="${IMAGE:-madpsy/ubersdr_airsplice:latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
+BUILDER="${BUILDER:-ubersdr-multiarch}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,19 +35,36 @@ check_deps() {
     command -v docker >/dev/null || die "docker not found in PATH"
 }
 
-build() {
-    check_deps
+# Ensure a buildx builder that supports multi-platform builds exists.
+# If it already exists we just use it; we never delete existing builders.
+ensure_builder() {
+    if ! docker buildx inspect "$BUILDER" &>/dev/null; then
+        echo "Creating buildx builder '$BUILDER'..."
+        docker buildx create --name "$BUILDER" --driver docker-container --bootstrap
+    else
+        echo "Using existing buildx builder '$BUILDER'."
+    fi
+}
 
+stage_context() {
     TMPCTX="$(mktemp -d)"
     trap 'rm -rf "$TMPCTX"' EXIT
 
     echo "Staging build context in $TMPCTX..."
-
     rsync -a --exclude='.git' \
               --exclude='recordings' \
               --exclude='data' \
               --exclude='ubersdr_airsplice' \
               "$SCRIPT_DIR/" "$TMPCTX/"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+build() {
+    check_deps
+    stage_context
 
     echo "Building image $IMAGE (platform=$PLATFORM)..."
     docker build \
@@ -57,9 +76,21 @@ build() {
 }
 
 push() {
-    build
-    echo "Pushing $IMAGE..."
-    docker push "$IMAGE"
+    check_deps
+    ensure_builder
+    stage_context
+
+    local platforms="linux/amd64,linux/arm64"
+    echo "Building and pushing multi-arch image $IMAGE (platforms=$platforms)..."
+    docker buildx build \
+        --builder "$BUILDER" \
+        --platform "$platforms" \
+        --tag "$IMAGE" \
+        --push \
+        "$TMPCTX"
+
+    echo "Pushed multi-arch manifest: $IMAGE"
+
     echo "Committing and pushing git repository..."
     git add -A
     git diff --cached --quiet || git commit -m "Release $IMAGE"
