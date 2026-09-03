@@ -91,9 +91,22 @@ push() {
 
     echo "Pushed multi-arch manifest: $IMAGE"
 
-    echo "Committing and pushing git repository..."
-    git add -A
-    git diff --cached --quiet || git commit -m "Release $IMAGE"
+    # Push whatever is already committed — but never commit on the user's
+    # behalf. This previously ran "git add -A" and committed everything with
+    # a generic "Release" message, which silently swallowed real commit
+    # messages and would sweep any unrelated work in progress (or a stray
+    # credentials file) into a public push with no chance to review it.
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo
+        echo "WARNING: uncommitted changes — the image was built from them," >&2
+        echo "         but they are NOT being committed or pushed:" >&2
+        git status --short >&2
+        echo >&2
+        echo "         Commit them yourself, then run: git push" >&2
+        exit 1
+    fi
+
+    echo "Pushing git repository..."
     git push
 }
 
