@@ -9,7 +9,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -o /out/ubersdr_airsplice ./...
+# The tree now holds two packages -- main and internal/pcmv4 -- and
+# `go build -o <file> ./...` refuses to write more than one. Build the
+# main package; its dependency is compiled with it either way.
+RUN go build -o /out/ubersdr_airsplice .
 
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image

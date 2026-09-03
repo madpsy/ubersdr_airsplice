@@ -654,9 +654,15 @@ function renderChannels(channels) {
 function buildSmartRecordPanel(ch) {
   const sr = ch.smart_record || {};
   const enabled = !!sr.enabled;
-  const startThresh   = sr.start_thresh_db  != null ? sr.start_thresh_db  : 50;
+  // 10/5 dB are on the audio protocol version 4 SNR scale and were set from
+  // live measurement, not arithmetic: an empty channel reads ~0 dB (p99 <= 7),
+  // a normal SSB QSO 8-16, a strong signal ~30. See defaultSmartStartThreshDB
+  // in main.go for the captures. They were 50/35 back when the server sent
+  // noise as a density; a threshold carried over from then is ~34 dB too high
+  // on SSB and the gate would never open.
+  const startThresh   = sr.start_thresh_db  != null ? sr.start_thresh_db  : 10;
   const startHold     = sr.start_hold_sec   != null ? sr.start_hold_sec   : 2;
-  const stopThresh    = sr.stop_thresh_db   != null ? sr.stop_thresh_db   : 35;
+  const stopThresh    = sr.stop_thresh_db   != null ? sr.stop_thresh_db   : 5;
   const stopHold      = sr.stop_hold_sec    != null ? sr.stop_hold_sec    : 5;
   const maxRecordMins = sr.max_record_mins  != null ? sr.max_record_mins  : 0;
 

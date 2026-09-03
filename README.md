@@ -109,6 +109,32 @@ When enabled per channel, the recorder monitors the rolling SNR and applies a tw
 
 An optional `max_record_mins` cap closes the segment and returns to Idle if a single activation runs too long.
 
+#### SNR scale (changed in the audio protocol v4 migration)
+
+Thresholds are a **true SNR in dB**. Defaults are `start_thresh_db` **10** and `stop_thresh_db` **5**.
+
+What the scale looks like on a real receiver, measured on 2026-09-03 at the 2.4 kHz SSB passband:
+
+| Condition | Median | p95 | Max |
+|-----------|--------|-----|-----|
+| Empty channel (6 captures, ~20k packets) | −0.8 … +2.0 | ≤ 3.8 | 9.3 … 12.9 |
+| Normal SSB QSO (7.150 MHz) | 7.95 | 12.94 | 16.43 |
+| Strong signal (measured at 12 kHz USB) | 32.67 | 35.19 | 42.40 |
+
+An empty channel reads about **0 dB**, which is what a true passband SNR should do. The defaults were set from these populations rather than by rescaling the old numbers: 10 dB is above every idle capture's p99 (≤ 7.1) while still catching a normal QSO, and 5 dB is above idle p90 (≤ 3.8) so the stop countdown can actually complete. The hysteresis gap is **5 dB, not the old 15** — at 2.4 kHz there is only about 10 dB between the top of the idle spread and a sustained normal QSO, so a wider gap would put one threshold on the wrong side of its population. If you only want strong stations, raise `start_thresh_db`; a strong signal sits near 30 dB.
+
+They used to be 50 and 35. On audio protocol v2 the server sent the noise *density* N0 in dBFS/Hz while baseband power is integrated over the whole passband, so `baseband - noise` was not an SNR at all — it read `10*log10(passband Hz)` too high, and drifted whenever the filter width changed. From v3 the server sends the noise power inside the demodulator passband, so the subtraction is a real SNR and every reading is lower by:
+
+| Mode | Passband | Correction |
+|------|----------|-----------|
+| CW | 500 Hz | 27.0 dB |
+| USB/LSB | 2400 Hz (2.7 kHz default) | 33.8 dB |
+| USB/LSB | 2950 Hz (radiod preset, no bandwidth set) | 34.7 dB |
+| AM/SAM | 5000 Hz | 37.0 dB |
+| FM/NFM | 8000 Hz | 39.0 dB |
+
+> **Carrying thresholds over from a pre-v4 build?** Subtract the correction for your mode — about **34 dB** on SSB. A threshold left on the old scale sits ~34 dB above anything the server will now report, so the gate never opens and the channel silently records nothing.
+
 ### Scheduled recording
 
 When enabled per channel, recording only occurs within configured time windows. Each schedule rule can specify:

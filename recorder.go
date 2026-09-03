@@ -32,6 +32,12 @@
 //
 //	The gate is evaluated every gateTickInterval (250 ms) using the most
 //	recent SNR samples from snrAccumulator.peekLatest().
+//
+//	Both thresholds are a true SNR in dB, which is what audio protocol version 4
+//	reports.  On version 2 the same subtraction read 10*log10(passband) too high
+//	-- about 34 dB on SSB -- so thresholds tuned against that scale are far above
+//	anything this gate will now see and it would never open.  See
+//	defaultSmartStartThreshDB in main.go for the full table.
 package main
 
 import (

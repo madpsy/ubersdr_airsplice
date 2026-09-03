@@ -58,13 +58,13 @@
           <div id="add-smart-fields" class="smart-record-fields hidden">
             <div class="smart-record-grid">
               <label>Start SNR threshold (dB)
-                <input type="number" id="add-sr-start-thresh" value="50" step="0.5" />
+                <input type="number" id="add-sr-start-thresh" value="10" step="0.5" />
               </label>
               <label>Start hold (seconds)
                 <input type="number" id="add-sr-start-hold" value="2" min="0.1" step="0.1" />
               </label>
               <label>Stop SNR threshold (dB)
-                <input type="number" id="add-sr-stop-thresh" value="35" step="0.5" />
+                <input type="number" id="add-sr-stop-thresh" value="5" step="0.5" />
               </label>
               <label>Stop hold (seconds)
                 <input type="number" id="add-sr-stop-hold" value="5" min="0.1" step="0.1" />
@@ -74,6 +74,10 @@
               </label>
             </div>
             <p class="smart-record-hint">
+              Thresholds are true SNR in dB (audio protocol v4): an empty channel reads about 0 dB,
+              a normal SSB QSO 8&#8211;16 dB, a strong signal around 30 dB.<br>
+              Carrying a value over from a pre-v4 build? Subtract ~34 dB on SSB
+              (10&#183;log10 of the passband) or the gate will never open.<br>
               Recording starts when SNR ≥ start threshold for ≥ start hold seconds.<br>
               Recording stops when SNR &lt; stop threshold for ≥ stop hold seconds.<br>
               If max length &gt; 0, recording stops when that duration is reached and will not restart until the SNR drops below the stop threshold and rises again above the start threshold.

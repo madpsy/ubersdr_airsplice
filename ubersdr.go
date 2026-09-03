@@ -1,6 +1,6 @@
 // ubersdr.go — Connect to an UberSDR WebSocket stream and receive demodulated
-// PCM audio.  Includes a lightweight SNR accumulator fed from v2 full-header
-// packets.
+// PCM audio.  Includes a lightweight SNR accumulator fed from the signal
+// quality the audio protocol version 4 header carries.
 package main
 
 import (
@@ -21,6 +21,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
+	"github.com/madpsy/ubersdr_airsplice/internal/pcmv4"
 )
 
 const rcvBufSize = 16 * 1024 * 1024 // 16 MiB SO_RCVBUF
@@ -73,7 +75,8 @@ type wsMessage struct {
 }
 
 // ---------------------------------------------------------------------------
-// snrAccumulator — collects per-packet SNR from v2 full-header packets
+// snrAccumulator — collects per-packet SNR from the version 4 header's
+// signal quality fields
 // ---------------------------------------------------------------------------
 
 // SNRStats is a snapshot of accumulated SNR measurements.
@@ -536,7 +539,10 @@ func (inst *instance) wsURL() string {
 	q.Set("frequency", fmt.Sprintf("%d", dialHz))
 	q.Set("mode", inst.audioMode)
 	q.Set("format", "pcm-zstd")
-	q.Set("version", "2")
+	// Audio protocol version 4: the predictive lossless codec, not the zstd
+	// wrapper. The format name is unchanged -- it still selects the lossless
+	// path -- only the version moves. See pcm_decoder.go.
+	q.Set("version", fmt.Sprintf("%d", pcmv4.ProtocolVersion))
 	q.Set("user_session_id", inst.sessionID)
 	if inst.password != "" {
 		q.Set("password", inst.password)
@@ -654,6 +660,7 @@ func (inst *instance) runOnce(ctx context.Context) (reconnect bool) {
 	var totalPackets atomic.Int64
 
 	firstPacket := true
+	decodeErrs := 0       // decode failures on this connection, logged in bursts
 	var instFFT *audioFFT // lazily created once sample rate is known
 
 	inst.mu.Lock()
@@ -685,9 +692,20 @@ func (inst *instance) runOnce(ctx context.Context) (reconnect bool) {
 
 		switch msgType {
 		case websocket.BinaryMessage:
-			pkt, err := dec.decode(msg, true /* pcm-zstd */)
+			// Every binary message reaches the decoder, in order, even when
+			// its samples are then dropped: the version 4 predictor adapts on
+			// what it decodes, so a skipped packet desynchronises the rest of
+			// the stream. dec belongs to this connection alone and is
+			// discarded with it, which is the reset the format requires.
+			pkt, err := dec.decode(msg)
 			if err != nil {
-				log.Printf("[%s] decode: %v", inst.label, err)
+				decodeErrs++
+				// One line per burst rather than one per packet: a
+				// desynchronised stream would otherwise flood the log at the
+				// packet rate.
+				if decodeErrs == 1 || decodeErrs%1000 == 0 {
+					log.Printf("[%s] decode (%d so far): %v", inst.label, decodeErrs, err)
+				}
 				continue
 			}
 			if len(pkt.pcm) == 0 {
@@ -702,10 +720,11 @@ func (inst *instance) runOnce(ctx context.Context) (reconnect bool) {
 				inst.streamMu.Unlock()
 			}
 
-			// Accumulate SNR from v2 full-header packets.
-			// snrAccum.add() already silently drops NaN/Inf values, so just
-			// feed every packet — the server may send NaN on early packets
-			// before the demodulator has a valid measurement.
+			// Accumulate SNR from the header's signal quality fields.
+			// hasSigInfo is false when radiod reported nothing (the -999
+			// sentinel), which would otherwise drag the average to the floor;
+			// snrAccum.add() drops NaN/Inf on top of that, so everything that
+			// reaches it is a real measurement.
 			if pkt.hasSigInfo {
 				inst.snrAccum.add(pkt.basebandDBFS, pkt.noiseDBFS)
 			}

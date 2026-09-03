@@ -47,11 +47,105 @@ func envIntOr(key string, def int) int {
 // channelConfig — one entry in channels.json
 // ---------------------------------------------------------------------------
 
+// SNR SCALE — CHANGED WITH AUDIO PROTOCOL VERSION 4
+// ------------------------------------------------
+// The thresholds below are in dB of SNR as the server now reports it, and that
+// scale moved when this addon migrated from protocol version 2 to version 4.
+//
+// Version 2 put radiod's raw noise DENSITY N0 (dBFS/Hz) in the packet header,
+// while baseband power is a power integrated over the whole passband (dBFS).
+// Subtracting one from the other therefore did not yield an SNR at all; it
+// yielded S/N0 in dB·Hz, reading 10·log10(passband Hz) too high. From version 3
+// the server sends the noise POWER inside the demodulator passband instead
+// (ka9q_ubersdr/websocket.go, channelNoisePower in radiod_status.go), so the
+// same subtraction is a true SNR.
+//
+// Every reading is therefore LOWER on version 4 by 10·log10(passband Hz):
+//
+//	mode        passband          correction
+//	CW          500 Hz            27.0 dB
+//	USB/LSB     2400 Hz           33.8 dB   (this addon's 2.7 kHz default)
+//	USB/LSB     2950 Hz           34.7 dB   (radiod preset, when no bandwidth
+//	                                         is configured)
+//	AM/SAM      5000 Hz           37.0 dB
+//	FM/NFM      8000 Hz           39.0 dB
+//
+// The old figure also drifted with the filter width; the new one does not.
+//
+// WHERE THE DEFAULTS COME FROM: MEASUREMENT, NOT ARITHMETIC
+// ---------------------------------------------------------
+// Rescaling the old 50/35 by that correction gives 16/1, and BOTH are wrong
+// against the live receiver. They were checked on m9psy.tunnel.ubersdr.org on
+// 2026-09-03, through this addon's own v4 decoder, at the 2.4 kHz SSB passband
+// these defaults are for, sampling the gate-visible statistic (the mean of the
+// last two packets, as peekLatest(2) computes it):
+//
+//	IDLE / no signal   6 captures, ~20,000 packets
+//	  7.13/7.18/14.2/13.9 MHz and two 90 s captures on 7.12/7.15 MHz
+//	  median  -0.8 .. +2.0     p90  0.3 .. 3.8
+//	  p99      1.1 .. 7.1      max  9.3 .. 12.9
+//
+//	MODERATE SSB QSO   7.150 MHz LSB, station working
+//	  median   7.95            p95 12.94     max 16.43
+//
+//	STRONG SIGNAL      independently measured at 12 kHz USB
+//	  median  32.67            p95 35.19     max 42.40
+//
+// An empty channel reads ~0 dB, which is what a true passband SNR must do and
+// is the strongest confirmation that the units derivation above is right.
+//
+// Two things follow, and both contradict the arithmetic:
+//
+//	START 16 was too HIGH. A normal SSB QSO peaks around 16 dB and sustains
+//	8-13; only an exceptionally strong station clears 16. A voice recorder that
+//	only catches strong stations is broken. 10 dB sits above every idle capture's
+//	p99 (<=7.1) with idle duty above 10 dB measured at 0.0-0.1%, and still
+//	catches the moderate QSO.
+//
+//	STOP 1 was far too LOW -- it is inside the idle spread, not below it. Idle
+//	duty above 1 dB was measured at 12.7%, 31.2% and 75.0% on three channels, so
+//	the tail countdown would be cancelled by ordinary noise and a recording might
+//	never close. 5 dB is above idle p90 on every capture (<=3.8) and above p95 on
+//	both long ones; the longest continuously-below-5 run on the active channel
+//	was ~39 s, far more than the 5 s the tail needs.
+//
+// HYSTERESIS: 5 dB, DELIBERATELY NOT 15
+// -------------------------------------
+// The old 15 dB gap cannot be kept. At 2.4 kHz the measured distance between the
+// top of the idle spread (p99 ~7) and a sustained moderate QSO (~8-16) is only
+// about 10 dB, so a 15 dB gap would force one threshold outside its population:
+// that is exactly how 16/1 ended up straddling the wrong sides. 5 dB is the
+// widest gap that keeps start above idle and stop below normal speech, and it is
+// wide enough to stop the gate chattering on a marginal signal.
+//
+// Someone who only wants strong stations should RAISE start; the measurements
+// above say a strong signal sits near 30 dB, so there is plenty of room.
+//
+// ANYONE CARRYING A THRESHOLD OVER FROM A PRE-VERSION-4 BUILD MUST SUBTRACT THE
+// CORRECTION FOR THEIR MODE — about 34 dB on SSB. A threshold left on the old
+// scale is roughly 34 dB above anything the server will ever report now, so the
+// gate never opens and the channel records nothing, silently.
+const (
+	// defaultSmartStartThreshDB is the default start_thresh_db: SNR must
+	// exceed this for start_hold_sec before a segment opens. Was 50 on the
+	// version 2 scale; set from the measured idle and QSO populations above,
+	// not by rescaling that number.
+	defaultSmartStartThreshDB = 10.0
+
+	// defaultSmartStopThreshDB is the default stop_thresh_db: SNR falling
+	// below this begins the tail countdown. Was 35 on the version 2 scale;
+	// set above the measured idle spread so the tail can actually complete.
+	defaultSmartStopThreshDB = 5.0
+)
+
 // SmartRecordConfig holds the VOX-style SNR-gated recording parameters for a
 // channel.  When Enabled is true the recorder only writes audio to disk while
 // the SNR is above StartThreshDB for at least StartHoldSec seconds, and stops
 // writing when the SNR falls below StopThreshDB for at least StopHoldSec
 // seconds.
+//
+// Both thresholds are on the version 4 SNR scale; see the block above before
+// changing them or carrying a value over from an older build.
 type SmartRecordConfig struct {
 	Enabled       bool    `json:"enabled"`
 	StartThreshDB float32 `json:"start_thresh_db"` // SNR must exceed this to start
