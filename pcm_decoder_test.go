@@ -22,7 +22,7 @@ import (
 // pcmv4StreamSHA is the SHA-256 of the fixture's samples as little-endian
 // int16, the same constant the codec package and every other port of this
 // decoder check against.
-const pcmv4StreamSHA = "ba368c898ae406c5acc806653d9f2dbbfa40086eca3707fda5d77c13948f78d1"
+const pcmv4StreamSHA = "4875d2185f1ff5a2031386c569cac0c2259e6a827b9e61f813399a19c3b9c903"
 
 // readFixturePackets returns the packets in testdata/pcmv4_stream.bin.
 // Layout: "UV4F", a format byte, a uint32 packet count, then each packet as a

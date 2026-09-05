@@ -25,15 +25,15 @@ import (
 //
 // The stream covers what the format can do: the ordinary mono audio this addon
 // records, silent packets carrying no body, an escape to verbatim samples on
-// incompressible noise, a sample-rate change, and interleaved stereo -- the
-// shape wfm arrives in -- including the varying packet length that makes the
-// header's sample count necessary, across the five-second periodic
+// incompressible noise, a sample-rate change, and two interleaved channels --
+// the shape wfm arrives in -- including the varying packet length that makes
+// the header's sample count necessary, across the five-second periodic
 // resynchronisation.
 //
 // The same fixture and the same expected hash are used by the Go, C++, Python
 // and JavaScript ports of this decoder; a change here that is not made there is
 // a divergence nothing else would report.
-const pcmv4ExpectedSHA = "ba368c898ae406c5acc806653d9f2dbbfa40086eca3707fda5d77c13948f78d1"
+const pcmv4ExpectedSHA = "4875d2185f1ff5a2031386c569cac0c2259e6a827b9e61f813399a19c3b9c903"
 
 // pcmv4RiceEdgeSHA is the same for testdata/pcmv4_rice_edge.bin, which covers
 // what a recording of ordinary traffic will not: a Rice codeword whose unary
@@ -41,7 +41,14 @@ const pcmv4ExpectedSHA = "ba368c898ae406c5acc806653d9f2dbbfa40086eca3707fda5d77c
 // decoder shifts by 64. It appeared about once every quarter of a million
 // packets on live IQ, which is often enough to matter to a recorder that runs
 // for months and rare enough that only a fixture will find it.
-const pcmv4RiceEdgeSHA = "83e3d94b509efbf7a212a3e10193b3eb281fe1460cbfeef6aabe474c92a718c7"
+const pcmv4RiceEdgeSHA = "3413109ff6d06d44fb8fa44c84595b776f5570f05663b762830853ddc0183527"
+
+// pcmv4ScaledSHA is the same for testdata/pcmv4_scaled.bin, the reduced-depth
+// IQ mode a client opts into with min_margin: profile 2, where a shift byte
+// leads the body and the samples come back shifted left by it. Getting the
+// shift wrong does not fail; it delivers a signal several bits too quiet, which
+// is exactly the kind of thing only a hash notices.
+const pcmv4ScaledSHA = "7315366ceed3e70552c28d31cde690a14dc66f5244b5a8dc34a5e696f5698ccc"
 
 // fixtureDir is the repository's testdata, shared with the package-level
 // integration tests rather than duplicated per package.
@@ -115,7 +122,7 @@ func TestPCMv4DecodesServerStream(t *testing.T) {
 	// decoder that lost the carried-forward metadata could still hash correctly
 	// while mislabelling the stream, and the sample rate is what the detector's
 	// timings are built on.
-	wantParams := [][2]int{{12000, 1}, {24000, 1}, {48000, 2}}
+	wantParams := [][2]int{{12000, 1}, {24000, 1}, {384000, 2}}
 
 	got, gotParams := hashStream(t, NewPCMv4StreamDecoder(), packets)
 	if got != pcmv4ExpectedSHA {
@@ -128,6 +135,22 @@ func TestPCMv4DecodesServerStream(t *testing.T) {
 		if gotParams[i] != wantParams[i] {
 			t.Fatalf("stream parameters: got %v, want %v", gotParams, wantParams)
 		}
+	}
+}
+
+// The reduced-depth mode. This addon records demodulated audio and so never
+// asks the server for it -- profile 2 arrives only for a client that sent
+// min_margin -- but the decoder is the same one every other port ships, and a
+// profile it declines to decode is a hard error rather than a fallback. The
+// fixture covers the paths that exist only there: a shift byte leading the
+// body, a shift that changes as the margin does, a silent packet that carries
+// no shift at all, an escape that carries one, and the profile switching to
+// plain IQ and back when the margin goes to lossless.
+func TestPCMv4DecodesScaledStream(t *testing.T) {
+	packets := readV4Fixture(t, "pcmv4_scaled.bin")
+	got, _ := hashStream(t, NewPCMv4StreamDecoder(), packets)
+	if got != pcmv4ScaledSHA {
+		t.Fatalf("scaled stream decoded wrongly\n got %s\nwant %s", got, pcmv4ScaledSHA)
 	}
 }
 

@@ -71,10 +71,29 @@ const (
 
 	// predTapLimit bounds |tap| to 2^24, a real-valued magnitude of 256. It
 	// caps the prediction sum far below int64 overflow no matter what the
-	// input does. Normal adaptation settles around 2^16, so the clamp is
-	// insurance that never fires in practice -- but it must be applied
+	// input does. With the leak below holding the taps near their equilibrium
+	// the clamp is insurance that never fires in practice -- but it must be applied
 	// identically on both sides, since if it ever does fire the two must agree.
 	predTapLimit = 1 << 24
+
+	// predLeakShiftComplex and predLeakShiftReal are the leakage of the tap
+	// update: every adapt subtracts w/2^shift from each tap before adding the
+	// gradient step.
+	//
+	// Without it the taps have no restoring force and are free to walk in any
+	// direction the input does not excite, which on a band whose energy sits in
+	// a few carriers is most of them. Measured on a 909 kHz iq384 stream they
+	// walked until the stream cost more than the samples going into it. The
+	// server's pcm_predictive.go carries the full account and the measurements
+	// behind these two values.
+	//
+	// This side reproduces the arithmetic exactly or the two ends part company
+	// within a packet: the magnitude is truncated towards zero, so a tap
+	// smaller than 2^shift leaks nothing, and a negative tap leaks the negation
+	// of what its magnitude would -- NOT what an arithmetic shift of a negative
+	// value gives.
+	predLeakShiftComplex = 14
+	predLeakShiftReal    = 16
 
 	// predEscapeFlag marks a body carrying verbatim samples.
 	predEscapeFlag = 1 << 7
@@ -116,6 +135,18 @@ const (
 	// PredProfileIQ is a single complex filter of order 16.
 	PredProfileIQ byte = 0
 
+	// PredProfileIQScaled is PredProfileIQ with a reduced-depth front end, and
+	// is what -min-margin asks the server for. The body carries a shift byte in
+	// front of the coded payload and the samples were requantised by that shift
+	// before the predictor saw them; the predictor itself is identical, because
+	// the scaling happens outside it.
+	//
+	// A separate profile id rather than a flag, so that a client which did not
+	// ask for the lossy mode cannot be handed one by accident: an unknown
+	// profile is a hard error here, where an unrecognised flag bit might be
+	// ignored and the samples then delivered several bits too quiet.
+	PredProfileIQScaled byte = 2
+
 	// PredProfileAudio is a four-stage real cascade, orders 8/8/4/2. Depth
 	// matters far more than filter length on demodulated audio, which carries
 	// a ~2.65 kHz passband in a 12 kHz channel and so leaves structure at
@@ -133,6 +164,10 @@ var predProfiles = map[byte]PredictorProfile{
 	PredProfileAudio: {
 		ID: PredProfileAudio, Name: "audio-real-8/8/4/2", Complex: false,
 		Orders: []int{8, 8, 4, 2}, Mus: []int64{16, 16, 32, 32},
+	},
+	PredProfileIQScaled: {
+		ID: PredProfileIQScaled, Name: "iq-complex-o16-scaled", Complex: true,
+		Orders: []int{16}, Mus: []int64{16},
 	},
 }
 
@@ -153,6 +188,13 @@ func predRoundShift(v int64, shift uint) int64 {
 	m := v >> 63
 	r := (((v ^ m) - m) + 1<<(shift-1)) >> shift
 	return (r ^ m) - m
+}
+
+// predLeak is the amount the leakage removes from one tap, the magnitude
+// divided by 2^shift and truncated towards zero. See predLeakShiftComplex.
+func predLeak(w int64, shift uint) int64 {
+	m := w >> 63
+	return ((((w ^ m) - m) >> shift) ^ m) - m
 }
 
 // predClampTap applies predTapLimit. See the constant for why.
@@ -260,16 +302,16 @@ func (f *complexStage) adapt(er, ei int64) {
 		for j := range wr {
 			hrs := sr[j]
 			his := -si[j]
-			wr[j] += mr*hrs - mi*his
-			wi[j] += mr*his + mi*hrs
+			wr[j] += mr*hrs - mi*his - predLeak(wr[j], predLeakShiftComplex)
+			wi[j] += mr*his + mi*hrs - predLeak(wi[j], predLeakShiftComplex)
 		}
 		return
 	}
 	for j := range wr {
 		hrs := sr[j]
 		his := -si[j]
-		wr[j] = predClampTap(wr[j] + mr*hrs - mi*his)
-		wi[j] = predClampTap(wi[j] + mr*his + mi*hrs)
+		wr[j] = predClampTap(wr[j] + mr*hrs - mi*his - predLeak(wr[j], predLeakShiftComplex))
+		wi[j] = predClampTap(wi[j] + mr*his + mi*hrs - predLeak(wi[j], predLeakShiftComplex))
 	}
 }
 
@@ -385,12 +427,12 @@ func (f *realStage) adapt(e int64) {
 	s = s[:len(w)]
 	if f.fast {
 		for j, sv := range s {
-			w[j] += m * sv
+			w[j] += m*sv - predLeak(w[j], predLeakShiftReal)
 		}
 		return
 	}
 	for j, sv := range s {
-		w[j] = predClampTap(w[j] + m*sv)
+		w[j] = predClampTap(w[j] + m*sv - predLeak(w[j], predLeakShiftReal))
 	}
 }
 
