@@ -338,6 +338,227 @@ function retentionOptionsHTML() {
 
 // ── Channels ─────────────────────────────────────────────────────────────────
 
+// ── Optional analysis: classification / transcription ────────────────────────
+//
+// The host decides whether each feature exists (CLASSIFY / TRANSCRIBE, both
+// off by default; GET /api/analysis). Each channel then opts in from its
+// settings. A feature that is off on the host is shown disabled with the
+// setting that turns it on, and a channel's saved choice is kept untouched.
+
+let analysisState = {
+  classify:   { enabled: false, model: '' },
+  transcribe: { enabled: false, model: '', state: 'disabled' },
+};
+let analysisLoaded = false;
+
+// Shown in the language list when the helper has not supplied its own.
+const FALLBACK_LANGS = ['en', 'de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'pl', 'uk', 'ar', 'zh', 'ja', 'ko', 'hi'];
+
+function analysisSignature() {
+  const c = analysisState.classify || {}, t = analysisState.transcribe || {};
+  return [c.enabled, c.model, t.enabled, t.model, t.state, (t.languages || []).length].join('|');
+}
+
+function loadAnalysis() {
+  return api('/api/analysis').then(s => {
+    const before = analysisSignature();
+    if (s) analysisState = s;
+    // When what the host offers changes (the Whisper model finished
+    // downloading, say), rebuild the channel cards so their controls follow.
+    if (analysisLoaded && analysisSignature() !== before) loadChannels();
+    analysisLoaded = true;
+    // Status lines in open panels update in place.
+    document.querySelectorAll('.an-note-transcribe').forEach(el => {
+      el.textContent = transcribeHostNote();
+      el.classList.toggle('error', transcribeHostError());
+    });
+    const st = (analysisState.transcribe || {}).state;
+    if (st === 'starting' || st === 'downloading') setTimeout(loadAnalysis, 3000);
+  }).catch(e => console.warn('analysis:', e));
+}
+
+function langName(code) {
+  if (!code || code === 'auto') return 'Detect automatically';
+  try {
+    const n = new Intl.DisplayNames(['en'], { type: 'language' }).of(code);
+    if (n && n !== code) return `${n} (${code})`;
+  } catch (_) {}
+  return code;
+}
+
+function classifyHostNote() {
+  const c = analysisState.classify || {};
+  return c.enabled ? `Classifier: ${c.model}` : 'Off on this host (set CLASSIFY=true to enable)';
+}
+
+function transcribeHostError() {
+  const t = analysisState.transcribe || {};
+  return t.enabled && (t.state === 'unavailable' || t.state === 'failed');
+}
+
+function transcribeHostNote() {
+  const t = analysisState.transcribe || {};
+  if (!t.enabled) return 'Off on this host (set TRANSCRIBE=true to enable)';
+  switch (t.state) {
+    case 'starting':    return 'Starting…';
+    case 'downloading': return `Downloading the ${t.model} model… ${Math.round((t.progress || 0) * 100)}%`;
+    case 'ready':       return `Whisper ${t.model}` + (t.queued ? ` · ${t.queued} queued` : '');
+    default:            return `Unavailable: ${t.error || t.state}`;
+  }
+}
+
+// The analysis section of a channel's settings, for the channel card and the
+// add-channel form. `an` is the channel's AnalysisConfig ({} for a new one).
+function buildAnalysisFields(an) {
+  an = an || {};
+  const c = analysisState.classify || {}, t = analysisState.transcribe || {};
+  if (!c.enabled && !t.enabled) {
+    const kept = (an.classify || an.transcribe)
+      ? ' This channel’s saved choices are kept and apply once a feature is enabled.' : '';
+    return `
+      <div class="an-fields an-off">
+        <div class="an-title">Analysis</div>
+        <p class="smart-record-hint">Classification and transcription are off on this host
+          (CLASSIFY / TRANSCRIBE).${kept}</p>
+      </div>`;
+  }
+  const langs = (t.languages && t.languages.length) ? t.languages : FALLBACK_LANGS;
+  const cur = an.language || 'auto';
+  const opts = ['auto', ...langs.filter(l => l !== 'auto')];
+  if (!opts.includes(cur)) opts.push(cur);
+  const langOptions = opts
+    .map(l => `<option value="${escHtml(l)}"${l === cur ? ' selected' : ''}>${escHtml(langName(l))}</option>`)
+    .join('');
+  return `
+    <div class="an-fields">
+      <div class="an-title">Analysis</div>
+      <label class="an-check${c.enabled ? '' : ' an-disabled'}">
+        <input type="checkbox" class="an-classify"${an.classify ? ' checked' : ''}${c.enabled ? '' : ' disabled'} />
+        Classify segments as voice / music / noise
+      </label>
+      <div class="an-note">${escHtml(classifyHostNote())}</div>
+      <label class="an-check${t.enabled ? '' : ' an-disabled'}">
+        <input type="checkbox" class="an-transcribe"${an.transcribe ? ' checked' : ''}${t.enabled ? '' : ' disabled'} />
+        Transcribe speech
+      </label>
+      <div class="an-note an-note-transcribe${transcribeHostError() ? ' error' : ''}">${escHtml(transcribeHostNote())}</div>
+      <div class="an-transcribe-opts">
+        <label class="sr-mode-label">Language
+          <select class="an-language">${langOptions}</select>
+        </label>
+        <label class="an-check">
+          <input type="checkbox" class="an-voice-only"${an.voice_only ? ' checked' : ''} />
+          Only transcribe segments classified as voice
+        </label>
+        <div class="an-note">Needs classification on for this channel; otherwise every segment is transcribed.</div>
+      </div>
+    </div>`;
+}
+
+// Keep the dependent controls' enabled state in step with the checkboxes.
+function wireAnalysisFields(container) {
+  const fields = container && container.querySelector('.an-fields:not(.an-off)');
+  if (!fields) return;
+  const cls = fields.querySelector('.an-classify');
+  const trn = fields.querySelector('.an-transcribe');
+  const lang = fields.querySelector('.an-language');
+  const vo = fields.querySelector('.an-voice-only');
+  const sync = () => {
+    const t = trn.checked && !trn.disabled;
+    lang.disabled = !t;
+    vo.disabled = !(t && cls.checked && !cls.disabled);
+    fields.querySelector('.an-transcribe-opts').classList.toggle('an-dim', !t);
+  };
+  cls.onchange = sync;
+  trn.onchange = sync;
+  sync();
+}
+
+// The AnalysisConfig from a container's fields, or null when the section is
+// not editable (both features off on the host): the caller then leaves the
+// channel's saved config alone. Disabled controls still carry the saved
+// values, so a feature that is off on the host keeps the channel's choice.
+function readAnalysisFields(container) {
+  const fields = container && container.querySelector('.an-fields:not(.an-off)');
+  if (!fields) return null;
+  const lang = fields.querySelector('.an-language').value;
+  return {
+    classify:   fields.querySelector('.an-classify').checked,
+    transcribe: fields.querySelector('.an-transcribe').checked,
+    language:   lang === 'auto' ? '' : lang,
+    voice_only: fields.querySelector('.an-voice-only').checked,
+  };
+}
+
+// Badges on a channel card for the features it has opted in to and the host runs.
+function channelAnalysisBadges(ch) {
+  const an = ch.analysis || {};
+  const c = analysisState.classify || {}, t = analysisState.transcribe || {};
+  let out = '';
+  if (an.classify && c.enabled) {
+    out += `<span class="an-badge" title="Classify: closed segments are labelled voice / music / noise">🏷</span>`;
+  }
+  if (an.transcribe && t.enabled) {
+    const lang = an.language ? ` ${escHtml(an.language.toUpperCase())}` : '';
+    const when = an.voice_only && an.classify && c.enabled ? ', when classified as voice' : '';
+    out += `<span class="an-badge" title="Transcribe: closed segments are transcribed with Whisper (${escHtml(langName(an.language || 'auto'))})${when}">📝${lang}</span>`;
+  }
+  return out;
+}
+
+const AN_LABELS = { voice: 'Voice', music: 'Music', 'voice+music': 'Voice + music', noise: 'Noise' };
+
+// A segment row's analysis cell: classification badge and transcript button.
+function segAnalysisHTML(seg) {
+  const a = (seg && seg.analysis) || {};
+  let out = '';
+  const c = a.classification;
+  if (c) {
+    if (c.status === 'done') {
+      const pct = v => Math.round(v || 0);
+      let title = `voice ${pct(c.voice_pct)}% · music ${pct(c.music_pct)}% · noise ${pct(c.noise_pct)}% — ${c.backend || ''}`;
+      if (c.band_hz && c.band_hz.length === 2) title += `, ${c.band_hz[0]}-${c.band_hz[1]} Hz`;
+      if (c.reason) title += ` — ${c.reason}`;
+      const key = (c.label || 'noise').replace('+', '-');
+      out += `<span class="an-label an-${key}" title="${escHtml(title)}">${escHtml(AN_LABELS[c.label] || c.label)}</span>`;
+    } else if (c.status === 'pending') {
+      out += `<span class="an-label an-pending" title="Classification queued">⋯</span>`;
+    } else {
+      out += `<span class="an-label an-${c.status}" title="Classification ${c.status}: ${escHtml(c.reason || '')}">${c.status === 'failed' ? '⚠' : '–'}</span>`;
+    }
+  }
+  const t = a.transcript;
+  if (t) {
+    if (t.status === 'done' && t.text) {
+      out += `<button class="an-tx-btn" onclick="toggleTranscript(this)" title="Show the transcript${t.partial ? ' (partial)' : ''}">📝${t.partial ? '*' : ''}</button>`;
+    } else if (t.status === 'done') {
+      out += `<span class="an-label an-skipped" title="Transcribed: no speech recognised">📝 –</span>`;
+    } else if (t.status === 'pending') {
+      out += `<span class="an-label an-pending" title="Transcription queued">📝 ⋯</span>`;
+    } else {
+      out += `<span class="an-label an-${t.status}" title="Transcription ${t.status}: ${escHtml(t.reason || '')}">📝 ${t.status === 'failed' ? '⚠' : '–'}</span>`;
+    }
+  }
+  return out;
+}
+
+// The transcript block under a segment row (empty when there is none).
+function segTranscriptHTML(seg) {
+  const t = seg && seg.analysis && seg.analysis.transcript;
+  if (!t || t.status !== 'done' || !t.text) return '';
+  const lines = (t.lines && t.lines.length ? t.lines : [t.text])
+    .map(l => `<p>${escHtml(l)}</p>`).join('');
+  let meta = `Whisper ${escHtml(t.model || '')} · ${escHtml(t.language && t.language !== 'auto' ? langName(t.language) : 'language detected automatically')}`;
+  if (t.partial) meta += ' · partial: the transcriber fell behind and skipped some audio';
+  return `${lines}<div class="an-tx-meta">${meta}</div>`;
+}
+
+function toggleTranscript(btn) {
+  const row = btn.closest('.seg-row');
+  const tx = row && row.querySelector('.seg-transcript');
+  if (tx && tx.innerHTML.trim()) tx.classList.toggle('hidden');
+}
+
 function loadChannels() {
   api('/api/channels').then(channels => {
     renderChannels(channels || []);
@@ -561,6 +782,7 @@ function renderChannels(channels) {
         <div class="ch-label">${ch.label}</div>
         ${srBadge}
         ${schedBadge}
+        ${channelAnalysisBadges(ch)}
         ${renameBtn}
       </div>
       <div class="ch-rename-form hidden">
@@ -634,6 +856,7 @@ function renderChannels(channels) {
       }
       // Wire schedule editor dynamic behaviour (add/remove rules)
       wireScheduleEditor(card);
+      wireAnalysisFields(card);
     }
 
     // Insert at correct position (or append if no reference card).
@@ -738,6 +961,7 @@ function buildSmartRecordPanel(ch) {
         <div class="sched-fields ${recModeVal === 'scheduled' ? '' : 'hidden'}">
           ${buildScheduleEditor(sched)}
         </div>
+        ${buildAnalysisFields(ch.analysis)}
         <button class="sr-save-btn">💾 Save</button>
         <span class="sr-save-status"></span>
       </div>
@@ -949,6 +1173,8 @@ function saveSmartRecord(card, label) {
   const maxMB = quotaInput ? parseInt(quotaInput.value, 10) : null;
 
   const patch = { smart_record: srConfig, schedule: schedConfig };
+  const an = readAnalysisFields(card);
+  if (an) patch.analysis = an;
   if (bwHz != null && !isNaN(bwHz)) patch.bandwidth_hz = bwHz;
   if (maxMB != null && !isNaN(maxMB) && maxMB >= 0) patch.max_mb = maxMB;
 
@@ -1066,6 +1292,13 @@ function stopLivePlayer(card) {
 
 function showAddChannelForm() {
   document.getElementById('add-channel-form').classList.remove('hidden');
+  // Analysis section, rebuilt each time so it reflects what the host offers.
+  // A new channel transcribes only voice by default when both are chosen.
+  const anMount = document.getElementById('add-analysis-mount');
+  if (anMount) {
+    anMount.innerHTML = buildAnalysisFields({ voice_only: true });
+    wireAnalysisFields(anMount);
+  }
   document.getElementById('add-name').focus();
   // Initialise bandwidth slider for the currently-selected mode.
   const mode   = document.getElementById('add-mode').value;
@@ -1135,6 +1368,8 @@ function doAddChannel() {
 
   const payload = { freq_hz: freqHz, mode };
   if (nameRaw) payload.name = nameRaw;
+  const an = readAnalysisFields(document.getElementById('add-analysis-mount'));
+  if (an) payload.analysis = an;
   if (bwHz > 0) payload.bandwidth_hz = bwHz;
 
   if (recMode === 'smart') {
@@ -1576,6 +1811,7 @@ function renderSessionCard(ss, container) {
         <span class="seg-time">${fmtDate(seg.started_at)}</span>
         <span class="seg-dur">${fmtDuration(seg.duration_sec)} so far</span>
         <span class="seg-snr"></span>
+        <span class="seg-analysis"></span>
         <div class="seg-actions">
           <button class="play-seg-btn" onclick="toggleSegPlayer(this, '${liveStreamUrl}')">▶ Listen</button>
         </div>
@@ -1597,6 +1833,7 @@ function renderSessionCard(ss, container) {
         <span class="seg-time">${fmtDate(seg.started_at)}</span>
         <span class="seg-dur">${fmtDuration(seg.duration_sec)}</span>
         <span class="seg-snr">SNR: ${fmtSNR(seg.snr)}</span>
+        <span class="seg-analysis">${segAnalysisHTML(seg)}</span>
         <div class="seg-actions">
           <button class="play-seg-btn" onclick="toggleSegPlayer(this, '${previewUrl}')">▶</button>
           <div class="seg-dl-wrap">
@@ -1610,7 +1847,8 @@ function renderSessionCard(ss, container) {
         </div>
         <div class="seg-player hidden">
           <audio controls preload="none" class="seg-audio" src="${dlUrl}"></audio>
-        </div>`;
+        </div>
+        <div class="seg-transcript hidden">${segTranscriptHTML(seg)}</div>`;
     }
     segContainer.appendChild(row);
   });
@@ -2805,6 +3043,29 @@ function connectSSE() {
     }
   });
 
+  // Classification / transcription results: update the segment's row in place.
+  es.addEventListener('recording_analysed', e => {
+    try {
+      const d = (JSON.parse(e.data) || {}).data || {};
+      if (!d.id) return;
+      const seg = { analysis: d.analysis };
+      document.querySelectorAll(`.seg-row[data-id="${CSS.escape(d.id)}"]`).forEach(row => {
+        const cell = row.querySelector('.seg-analysis');
+        if (cell) cell.innerHTML = segAnalysisHTML(seg);
+        const tx = row.querySelector('.seg-transcript');
+        if (tx) {
+          const open = !tx.classList.contains('hidden');
+          tx.innerHTML = segTranscriptHTML(seg);
+          tx.classList.toggle('hidden', !(open && tx.innerHTML));
+        }
+      });
+      // Keep the session card's segment list current for later re-renders.
+      document.querySelectorAll('.session-card').forEach(card => {
+        (card._segments || []).forEach(s => { if (s.id === d.id) s.analysis = d.analysis; });
+      });
+    } catch (_) {}
+  });
+
   es.addEventListener('recording_started', e => {
     loadChannels();
     // Play ding if bell is enabled for this channel.
@@ -3007,7 +3268,7 @@ function isViewingLiveDate() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-checkAuth().then(() => {
+checkAuth().then(loadAnalysis).then(() => {
   loadChannels();
   loadDates();
   loadRecordings();
@@ -3017,6 +3278,8 @@ checkAuth().then(() => {
   connectSNRStream();
   // Full channel card refresh every 30 s (structural changes handled by SSE events)
   setInterval(loadChannels, 30000);
+  // What the host offers for analysis (e.g. the transcriber becoming ready).
+  setInterval(loadAnalysis, 60000);
   // Auto-refresh recordings every 60 s — skip when viewing a past date because
   // historical data is immutable and there is nothing new to show.
   setInterval(() => { if (isViewingLiveDate()) loadRecordings(); }, 60000);

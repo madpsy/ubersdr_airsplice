@@ -279,7 +279,7 @@ func putU16LE(b []byte, v uint16) {
 // startHTTPServer wires all routes and starts listening.
 // ---------------------------------------------------------------------------
 
-func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *channelManager, uiPassword string, rc *retentionConfig, retentionCfgPath string, qc *quotaConfig, quotaCfgPath string) error {
+func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *channelManager, uiPassword string, rc *retentionConfig, retentionCfgPath string, qc *quotaConfig, quotaCfgPath string, az *analyzer) error {
 	sessions := newSessionStore()
 	mux := http.NewServeMux()
 
@@ -428,6 +428,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				SmartRecord SmartRecordConfig `json:"smart_record"` // optional VOX gate config
 				Schedule    ScheduleConfig    `json:"schedule"`     // optional time-based schedule
 				BandwidthHz int               `json:"bandwidth_hz"` // optional filter bandwidth
+				Analysis    AnalysisConfig    `json:"analysis"`     // optional classification / transcription opt-in
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "invalid body", http.StatusBadRequest)
@@ -447,7 +448,11 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 					return
 				}
 			}
-			ch, err := mgr.add(body.FreqHz, body.Mode, body.Name, "", body.SmartRecord, body.Schedule, body.BandwidthHz)
+			if errMsg := validateAnalysisConfig(body.Analysis); errMsg != "" {
+				http.Error(w, fmt.Sprintf(`{"error":"analysis: %s"}`, errMsg), http.StatusBadRequest)
+				return
+			}
+			ch, err := mgr.add(body.FreqHz, body.Mode, body.Name, "", body.SmartRecord, body.Schedule, body.BandwidthHz, body.Analysis)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusConflict)
 				return
@@ -506,14 +511,21 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				Schedule    *ScheduleConfig    `json:"schedule"`
 				BandwidthHz *int               `json:"bandwidth_hz"`
 				MaxMB       *int64             `json:"max_mb"`
+				Analysis    *AnalysisConfig    `json:"analysis"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
 				return
 			}
-			if body.Name == nil && body.SmartRecord == nil && body.Schedule == nil && body.BandwidthHz == nil && body.MaxMB == nil {
-				http.Error(w, `{"error":"name, smart_record, schedule, bandwidth_hz, or max_mb required"}`, http.StatusBadRequest)
+			if body.Name == nil && body.SmartRecord == nil && body.Schedule == nil && body.BandwidthHz == nil && body.MaxMB == nil && body.Analysis == nil {
+				http.Error(w, `{"error":"name, smart_record, schedule, bandwidth_hz, max_mb, or analysis required"}`, http.StatusBadRequest)
 				return
+			}
+			if body.Analysis != nil {
+				if errMsg := validateAnalysisConfig(*body.Analysis); errMsg != "" {
+					http.Error(w, fmt.Sprintf(`{"error":"analysis: %s"}`, errMsg), http.StatusBadRequest)
+					return
+				}
 			}
 
 			// Apply rename if requested.
@@ -570,6 +582,18 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				hub.broadcast(sseEvent{
 					Event: "channel_updated",
 					Data:  map[string]interface{}{"label": newLabel, "bandwidth_hz": *body.BandwidthHz},
+				})
+			}
+
+			// Apply analysis opt-in if provided.
+			if body.Analysis != nil {
+				if err := mgr.setAnalysis(newLabel, *body.Analysis); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+					return
+				}
+				hub.broadcast(sseEvent{
+					Event: "channel_updated",
+					Data:  map[string]interface{}{"label": newLabel, "analysis": *body.Analysis},
 				})
 			}
 
@@ -1886,6 +1910,20 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 	})
 
 	// -----------------------------------------------------------------------
+	// GET /api/analysis — the optional analysis features this host offers:
+	// whether each is enabled, which model, the transcriber's state (starting,
+	// downloading, ready, unavailable, failed) and the queue lengths. The UI
+	// greys out a channel's analysis options when the feature is off here.
+	// -----------------------------------------------------------------------
+	mux.HandleFunc("/api/analysis", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, az.statusSnapshot())
+	})
+
+	// -----------------------------------------------------------------------
 	// GET /api/status — overall server status
 	// -----------------------------------------------------------------------
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -1907,6 +1945,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				"overall_mb": overallMB,
 				"channels":   chQuota,
 			},
+			"analysis": az.statusSnapshot(),
 		})
 	})
 
@@ -1920,4 +1959,23 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("[web] json encode: %v", err)
 	}
+}
+
+// validateAnalysisConfig checks a channel's analysis opt-in. The language is a
+// Whisper language code ("en", "de", "yue"...) or "auto"; the full list comes
+// from the helper and is offered by the UI, so this only checks the shape.
+func validateAnalysisConfig(an AnalysisConfig) string {
+	l := an.Language
+	if l == "" || l == "auto" {
+		return ""
+	}
+	if len(l) < 2 || len(l) > 8 {
+		return "language must be a Whisper language code or \"auto\""
+	}
+	for _, c := range l {
+		if c < 'a' || c > 'z' {
+			return "language must be a Whisper language code or \"auto\""
+		}
+	}
+	return ""
 }

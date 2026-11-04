@@ -91,6 +91,12 @@ type recChannel struct {
 	schedMu sync.RWMutex
 	sched   ScheduleConfig
 
+	// Optional analysis opt-in — protected by anMu so it can be updated live.
+	// analyzer is shared by every channel; nil-safe (features off).
+	anMu     sync.RWMutex
+	analysis AnalysisConfig
+	analyzer *analyzer
+
 	// Gate state — only accessed from the run() goroutine (no lock needed).
 	gState     gateState
 	gHoldStart time.Time // when the current hold period began
@@ -147,7 +153,7 @@ type telemetryEntry struct {
 	LevelDBFS float32  `json:"level_dbfs"`
 }
 
-func newRecChannel(inst *instance, store *recordingStore, hub *sseHub, segmentSecs int, channelID string, sr SmartRecordConfig, sched ScheduleConfig) *recChannel {
+func newRecChannel(inst *instance, store *recordingStore, hub *sseHub, segmentSecs int, channelID string, sr SmartRecordConfig, sched ScheduleConfig, an AnalysisConfig, az *analyzer) *recChannel {
 	return &recChannel{
 		inst:        inst,
 		store:       store,
@@ -157,7 +163,26 @@ func newRecChannel(inst *instance, store *recordingStore, hub *sseHub, segmentSe
 		channelID:   channelID,
 		sr:          sr,
 		sched:       sched,
+		analysis:    an,
+		analyzer:    az,
 	}
+}
+
+// setAnalysis atomically replaces the channel's analysis opt-in. Segments
+// already queued keep the settings they were queued with.
+func (c *recChannel) setAnalysis(an AnalysisConfig) {
+	c.anMu.Lock()
+	c.analysis = an
+	c.anMu.Unlock()
+	log.Printf("[%s] analysis updated: classify=%v transcribe=%v language=%q voice_only=%v",
+		c.label, an.Classify, an.Transcribe, langOrAuto(an.Language), an.VoiceOnly)
+}
+
+// getAnalysis returns a copy of the channel's analysis opt-in.
+func (c *recChannel) getAnalysis() AnalysisConfig {
+	c.anMu.RLock()
+	defer c.anMu.RUnlock()
+	return c.analysis
 }
 
 // setSmartRecord atomically replaces the smart-record config.
@@ -774,6 +799,8 @@ func (c *recChannel) closeSegment() {
 
 	if err := c.store.add(r); err != nil {
 		log.Printf("[%s] store.add: %v", c.label, err)
+	} else if c.analyzer != nil {
+		c.analyzer.enqueue(r, c.getAnalysis(), c.inst.getBandwidth())
 	}
 
 	log.Printf("[%s] closed segment %s (session %s idx %d, %.1fs, %.1f kB)",
@@ -827,6 +854,9 @@ func (c *recChannel) statusSnapshot() map[string]interface{} {
 		}
 		snap["smart_record_gate"] = gateStr
 	}
+
+	// Analysis opt-in (the host-wide switches are in GET /api/analysis).
+	snap["analysis"] = c.getAnalysis()
 
 	// Schedule state.
 	sched := c.getSchedule()

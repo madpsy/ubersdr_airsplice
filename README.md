@@ -70,6 +70,14 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `SEGMENT_SECS` | `300` | Rotate to a new WAV file every N seconds; `0` = one continuous file per session |
 | `CLEANUP_ALL_DAYS` | `30` | Delete ALL recordings older than N days; `0` = disabled |
 | `MAX_STORAGE_MB` | `20480` | Maximum total storage in MB across all channels; `0` = unlimited |
+| `CLASSIFY` | `false` | Classify closed segments as voice / music / noise — see [Analysis](#analysis-optional) |
+| `CLASSIFY_MODEL` | `dsp` | Classifier to use (this build: `dsp`) |
+| `TRANSCRIBE` | `false` | Transcribe closed segments with Whisper |
+| `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
+| `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
+| `WHISPER_THREADS` | `2` | CPU threads for Whisper |
+| `WHISPER_SPEED` | `1.0` | Feed audio to Whisper at this multiple of real time (0.5–8) |
+| `MODEL_DIR` | `<OUTPUT_DIR>/models` | Where downloaded models are kept |
 
 Channels are **not** configured via environment variables — they are added and removed through the web UI and persisted to `channels.json` in the output directory.
 
@@ -87,6 +95,7 @@ Open `http://<host>:6095` in a browser to access:
 - **Download** — stream any session or individual segment as a WAV file
 - **Delete** — remove individual segments or entire sessions (requires UI password)
 - **Retention & quota settings** — configure per-channel or global retention hours and storage quotas from the UI
+- **Analysis** (optional) — per-channel classification and transcription settings; each segment shows its voice / music / noise label and, when transcribed, a 📝 button that opens the transcript
 
 ---
 
@@ -149,6 +158,52 @@ Smart Record and Schedule can be combined: the schedule gate controls *when* the
 
 ---
 
+## Analysis (optional)
+
+Two optional features work on each segment after it closes, in the background, without holding up recording. **Both are off by default.** Each needs two switches:
+
+1. **On the host** — `CLASSIFY=true` and/or `TRANSCRIBE=true`. While a feature is off nothing is loaded, downloaded or started for it.
+2. **On the channel** — in the channel's ⚙ Settings, under *Analysis*. A new channel opts in to nothing, so enabling a feature on the host never starts work on a channel by surprise.
+
+The model is chosen once per host, so one model is loaded and results mean the same thing on every channel. In the UI, an option that is off on the host is shown disabled with the setting that turns it on; the channel's saved choice is kept and applies once the feature is enabled.
+
+### Classification
+
+Labels each segment **voice**, **music**, **voice + music** or **noise**, with the share of 5-second windows in each. The `dsp` classifier is a port of [NightDX](https://github.com/marcozennaro/nightdx)'s model-free classifier (MIT, © Marco Zennaro): spectral flatness, syllabic (2–8 Hz) loudness rhythm and spectral steadiness, with NightDX's thresholds.
+
+Two receiver-side rules apply on top:
+
+- **Band.** The measurement band is NightDX's 250–3500 Hz capped at the channel's audio passband. Without the cap an SSB filter's skirt falls inside the band and makes an empty SSB channel read as music.
+- **SNR.** A segment whose average passband SNR is below 3 dB is noise whatever the classifier hears in the hiss (an empty channel reads about 0 dB on the v4 scale). The label's backend then reads `dsp+snr`.
+
+Data modes such as FT8 are steady tones and classify as music: not voice, which is what *Only transcribe voice* needs, but not a data-mode detector either.
+
+### Transcription
+
+Runs [UberSDR's `whisper-helper`](https://github.com/ka9q/ubersdr) — whisper.cpp with Silero voice-activity detection, the same recogniser the UberSDR desktop client uses — as a child process at low CPU priority. airsplice does not ship it: build it from `clients/electron/whisper` in the UberSDR tree (it is statically linked, one file per platform) and set `WHISPER_HELPER` to its path, or mount it into the container. If it is missing, transcription reports itself unavailable in the UI rather than failing silently.
+
+The Whisper model and the VAD model are downloaded on first start into `MODEL_DIR`, from Hugging Face URLs pinned to a commit and checked against a pinned size and SHA-256 (the same pins as UberSDR's `models.json`). `base` is about 60 MB, `tiny` 32 MB, `small` 190 MB.
+
+Per channel you choose the **language** (or automatic detection) and whether to **only transcribe segments classified as voice** (which needs classification on for the channel too).
+
+Whisper's helper is built for live audio: it skips audio once it is more than 10 s behind. Segments are therefore fed at `WHISPER_SPEED` × real time, one at a time; a transcript the helper fell behind on is marked *partial*. At the default 1.0 one helper keeps up with one channel's worth of continuous audio — transcription suits VOX and scheduled channels best. When the queue (32 segments) is full the oldest waiting segment is skipped.
+
+### Results
+
+Results are stored in each segment's `.json` sidecar under `analysis`, and pushed to the UI as they arrive:
+
+```json
+"analysis": {
+  "classification": { "status": "done", "label": "voice", "voice_pct": 89, "music_pct": 0, "noise_pct": 11,
+                      "backend": "dsp", "band_hz": [300, 2430], "windows": ["voice", "voice", "noise"] },
+  "transcript": { "status": "done", "language": "en", "model": "base", "text": "…", "lines": ["…"], "partial": false }
+}
+```
+
+`status` is `pending`, `done`, `skipped` or `failed` (with a `reason`). Segments under 2 s are skipped. Work still pending at shutdown is picked up again on the next start. `GET /api/analysis` reports what the host offers: whether each feature is enabled, the model, the transcriber's state (`starting`, `downloading`, `ready`, `unavailable`, `failed`) and the queue lengths.
+
+---
+
 ## Output files
 
 Each completed recording segment produces three files in the output directory:
@@ -156,7 +211,7 @@ Each completed recording segment produces three files in the output directory:
 | File | Description |
 |------|-------------|
 | `<uuid>.wav` | PCM audio (mono S16LE, sample rate from UberSDR) |
-| `<uuid>.json` | Segment metadata (label, frequency, mode, timestamps, duration, SNR stats) |
+| `<uuid>.json` | Segment metadata (label, frequency, mode, timestamps, duration, SNR stats, and [analysis](#analysis-optional) results when enabled) |
 | `<uuid>.jsonl` | Telemetry log: one JSON object per line, appended every ~10 s while recording — `{"t":"<ISO>","snr":{...},"level_dbfs":<f32>}` |
 
 A session-level sidecar (`session_<uuid>.json`) is also maintained, grouping all segments that belong to the same continuous recording session.
@@ -230,6 +285,14 @@ All flags:
 | `-segment-secs` | `300` | WAV segment length in seconds; `0` = continuous |
 | `-cleanup-all-days` | `30` | Delete recordings older than N days; `0` = disabled |
 | `-max-storage-mb` | `20480` | Maximum total storage in MB; `0` = unlimited |
+| `-classify` | `false` | Classify closed segments |
+| `-classify-model` | `dsp` | Classifier |
+| `-transcribe` | `false` | Transcribe closed segments |
+| `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
+| `-whisper-model` | `base` | `tiny`, `base` or `small` |
+| `-whisper-threads` | `2` | CPU threads for Whisper |
+| `-whisper-speed` | `1.0` | Multiple of real time to feed Whisper |
+| `-model-dir` | `<output>/models` | Downloaded model cache |
 
 ---
 

@@ -32,13 +32,20 @@ type recordingRecord struct {
 	Channels     int       `json:"channels"`
 	Filename     string    `json:"filename"` // WAV filename (basename)
 	SNR          SNRStats  `json:"snr"`
+
+	// Analysis holds classification and transcription results when those
+	// optional features ran for this segment (analysis.go).
+	Analysis *segmentAnalysis `json:"analysis,omitempty"`
 }
 
 // recordingStore is a thread-safe in-memory list of completed recordings.
 type recordingStore struct {
-	mu        sync.RWMutex
-	records   []*recordingRecord // newest first
-	byID      map[string]*recordingRecord
+	mu      sync.RWMutex
+	records []*recordingRecord // newest first
+	byID    map[string]*recordingRecord
+	// sidecarMu orders sidecar writes, which share a .tmp name per file: held
+	// from the in-memory change to the rename, so the last update wins on disk.
+	sidecarMu sync.Mutex
 	deleted   map[string]struct{} // IDs removed by cleanup; prevents re-insertion on restart
 	hub       *sseHub
 	outputDir string
@@ -243,6 +250,8 @@ func recoverOrphanedWAV(wavPath, filename string) *recordingRecord {
 // add inserts a new record, writes its per-segment JSON sidecar, and
 // updates the session-level JSON sidecar atomically.
 func (s *recordingStore) add(rec *recordingRecord) error {
+	s.sidecarMu.Lock()
+	defer s.sidecarMu.Unlock()
 	if err := os.MkdirAll(s.outputDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
@@ -275,6 +284,56 @@ func (s *recordingStore) add(rec *recordingRecord) error {
 	}
 
 	return nil
+}
+
+// updateAnalysis applies fn to a record's analysis and rewrites its sidecars.
+//
+// Records are shared with HTTP handlers that encode them outside the lock, so
+// the record is never modified in place: a copy with the new analysis replaces
+// it in both indexes, and a reader holding the old pointer keeps a consistent
+// old version. Returns the new record, or an os.ErrNotExist error if the
+// segment has been deleted.
+func (s *recordingStore) updateAnalysis(id string, fn func(*segmentAnalysis)) (*recordingRecord, error) {
+	s.sidecarMu.Lock()
+	defer s.sidecarMu.Unlock()
+	s.mu.Lock()
+	old, ok := s.byID[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("segment %s: %w", id, os.ErrNotExist)
+	}
+	rec := *old
+	var an segmentAnalysis
+	if old.Analysis != nil {
+		an = *old.Analysis
+	}
+	fn(&an)
+	rec.Analysis = &an
+	s.byID[id] = &rec
+	for i, r := range s.records {
+		if r == old {
+			s.records[i] = &rec
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	base := strings.TrimSuffix(rec.Filename, filepath.Ext(rec.Filename))
+	jdata, err := json.MarshalIndent(&rec, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal segment: %w", err)
+	}
+	if err := writeAtomic(filepath.Join(s.outputDir, base+".json"), jdata); err != nil {
+		return nil, fmt.Errorf("write segment sidecar: %w", err)
+	}
+	if rec.SessionID != "" {
+		if ss := s.getSession(rec.SessionID, ""); ss != nil {
+			if ssData, err := json.MarshalIndent(ss, "", "  "); err == nil {
+				_ = writeAtomic(filepath.Join(s.outputDir, "session_"+rec.SessionID+".json"), ssData)
+			}
+		}
+	}
+	return &rec, nil
 }
 
 // writeAtomic writes data to path via a temp file + rename.
