@@ -511,7 +511,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 /* Make seg-row a grid so the player can span full width */
 .seg-row {
   display: grid;
-  grid-template-columns: 28px 1fr 1fr 1fr auto auto;
+  grid-template-columns: minmax(28px, max-content) 1fr 1fr 1fr auto auto;
   align-items: center;
   gap: 12px;
   padding: 8px 16px 8px 32px;
@@ -637,6 +637,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .seg-live .seg-idx {
   /* override the default muted colour — the live-badge handles colour */
   color: inherit;
+  white-space: nowrap;
 }
 
 /* ── Channel card live audio player ── */
@@ -1260,3 +1261,29 @@ button.an-label:hover { filter: brightness(1.25); }
   .seg-row .seg-analysis { grid-column: 1 / -1; flex-wrap: wrap; }
   .an-strip { width: 56px; }
 }
+
+.app-version { font-size: 0.72rem; opacity: 0.6; margin-left: 6px; font-variant-numeric: tabular-nums; }
+
+/* "Last heard" on channel cards; tags in collapsed headers and segment rows */
+.ch-last-heard-wrap:empty { display: none; }
+.ch-last-heard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 2px;
+  font-size: 0.78rem;
+}
+.ch-last-title { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px; }
+.ch-last-line {
+  flex-basis: 100%;
+  color: var(--text);
+  font-style: italic;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-an-chip { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.seg-tags { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.seg-tags .an-tag, .sess-an-chip .an-tag, .ch-last-heard .an-tag { font-size: 0.7rem; padding: 0 7px; }

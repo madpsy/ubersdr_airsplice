@@ -696,3 +696,46 @@ func (s *recordingStore) delete(id string) error {
 
 	return nil
 }
+
+// lastHeard is a channel's most recent classified segment, for its card.
+type lastHeard struct {
+	SegmentID   string    `json:"segment_id"`
+	StartedAt   time.Time `json:"started_at"`
+	DurationSec float64   `json:"duration_sec"`
+	Label       string    `json:"label"`
+	VoicePct    float64   `json:"voice_pct"`
+	MusicPct    float64   `json:"music_pct"`
+	NoisePct    float64   `json:"noise_pct"`
+	Tags        []string  `json:"tags,omitempty"`
+	LastLine    string    `json:"last_line,omitempty"` // the segment's last transcript line, if any
+}
+
+// latestHeard returns the most recently started segment of a channel whose
+// classification has finished, or nil.
+func (s *recordingStore) latestHeard(channelID string) *lastHeard {
+	if channelID == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best *recordingRecord
+	for _, r := range s.records {
+		if r.ChannelID != channelID || r.Analysis == nil || r.Analysis.Classification == nil ||
+			r.Analysis.Classification.Status != analysisDone {
+			continue
+		}
+		if best == nil || r.StartedAt.After(best.StartedAt) {
+			best = r
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	c := best.Analysis.Classification
+	lh := &lastHeard{SegmentID: best.ID, StartedAt: best.StartedAt, DurationSec: best.DurationSec,
+		Label: c.Label, VoicePct: c.VoicePct, MusicPct: c.MusicPct, NoisePct: c.NoisePct, Tags: c.Tags}
+	if t := best.Analysis.Transcript; t != nil && t.Status == analysisDone && len(t.Lines) > 0 {
+		lh.LastLine = t.Lines[len(t.Lines)-1]
+	}
+	return lh
+}

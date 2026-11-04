@@ -26,6 +26,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${IMAGE:-madpsy/ubersdr_airsplice:latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 BUILDER="${BUILDER:-ubersdr-multiarch}"
+# The build's version, shown in the web UI: the git commit (the build context
+# is staged without .git, so it is passed in).
+VERSION="${VERSION:-$(git -C "$SCRIPT_DIR" describe --always --dirty 2>/dev/null || echo dev)}"
 # Release images carry whisper-helper; a plain `docker build` does not.
 WITH_WHISPER="${WITH_WHISPER:-1}"
 BUILD_JOBS="${BUILD_JOBS:-4}"
@@ -76,6 +79,7 @@ build() {
         --platform "$PLATFORM" \
         --build-arg WITH_WHISPER="$WITH_WHISPER" \
         --build-arg BUILD_JOBS="$BUILD_JOBS" \
+        --build-arg VERSION="$VERSION" \
         --tag "$IMAGE" \
         "$TMPCTX"
 
@@ -94,6 +98,7 @@ push() {
         --platform "$platforms" \
         --build-arg WITH_WHISPER="$WITH_WHISPER" \
         --build-arg BUILD_JOBS="$BUILD_JOBS" \
+        --build-arg VERSION="$VERSION" \
         --tag "$IMAGE" \
         --push \
         "$TMPCTX"

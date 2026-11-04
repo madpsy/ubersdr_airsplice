@@ -27,6 +27,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// version is the build, set by docker.sh (-ldflags "-X main.version=...");
+// shown in the web UI and GET /api/status.
+var version = "dev"
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -565,7 +569,7 @@ func main() {
 	// channels.json lives alongside the recordings in the output directory.
 	configPath := filepath.Join(*outputDir, "channels.json")
 
-	log.Printf("[main] ubersdr_airsplice starting")
+	log.Printf("[main] ubersdr_airsplice %s starting", version)
 	log.Printf("[main] UberSDR URL:   %s", *ubersdrURL)
 	log.Printf("[main] Output dir:    %s", *outputDir)
 	log.Printf("[main] Listen addr:   %s", *listenAddr)

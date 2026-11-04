@@ -5,6 +5,7 @@ package main
 import (
 	"compress/gzip"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -383,10 +384,25 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 		}
 		bp := basePath(r)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		indexTmpl.Execute(w, map[string]string{"BasePath": bp}) //nolint:errcheck
+		// Always revalidated, so an update's new asset URLs are seen at once.
+		w.Header().Set("Cache-Control", "no-cache")
+		indexTmpl.Execute(w, map[string]string{"BasePath": bp, "AssetVersion": assetVersion, "Version": version}) //nolint:errcheck
 	})
 
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	// Static assets. The page links them as ?v=<hash of their contents>, so
+	// a URL with the current hash never changes and may be cached for good;
+	// an update changes the hash and browsers and proxies fetch the new files.
+	// Anything else must be revalidated. (Embedded files carry no
+	// modification time, so without this nothing tells a cache they changed.)
+	staticHandler := http.StripPrefix("/static/", http.FileServer(http.FS(staticFS)))
+	mux.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("v") == assetVersion {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		staticHandler.ServeHTTP(w, r)
+	})
 
 	// Serve saved recordings for download — auth required when a password is set.
 	recFS := http.FileServer(http.Dir(store.outputDir))
@@ -1941,6 +1957,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 
 		overallMB, chQuota := qc.snapshot()
 		writeJSON(w, map[string]interface{}{
+			"version":          version,
 			"total_recordings": total,
 			"channels":         chStatus,
 			"quota": map[string]interface{}{
@@ -1981,3 +1998,16 @@ func validateAnalysisConfig(an AnalysisConfig) string {
 	}
 	return ""
 }
+
+// assetVersion identifies the embedded web assets: a hash of their contents,
+// put on their URLs so a new build is never served from a stale cache.
+var assetVersion = func() string {
+	h := sha256.New()
+	for _, name := range []string{"static/app.js", "static/style.css"} {
+		b, err := staticFiles.ReadFile(name)
+		if err == nil {
+			h.Write(b)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}()

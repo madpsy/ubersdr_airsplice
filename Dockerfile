@@ -86,7 +86,8 @@ COPY . .
 # The tree now holds two packages -- main and internal/pcmv4 -- and
 # `go build -o <file> ./...` refuses to write more than one. Build the
 # main package; its dependency is compiled with it either way.
-RUN go build -o /out/ubersdr_airsplice .
+ARG VERSION=dev
+RUN go build -ldflags "-X main.version=${VERSION}" -o /out/ubersdr_airsplice .
 
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image

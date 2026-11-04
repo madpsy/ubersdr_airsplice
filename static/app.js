@@ -528,12 +528,12 @@ function channelAnalysisBadges(ch) {
   const c = analysisState.classify || {}, t = analysisState.transcribe || {};
   let out = '';
   if (an.classify && c.enabled) {
-    out += `<span class="an-badge" title="Classify: closed segments are labelled voice / music / noise">🏷</span>`;
+    out += `<span class="an-badge" title="Closed segments are labelled voice / music / noise">🏷 Classify</span>`;
   }
   if (an.transcribe && t.enabled) {
     const lang = an.language ? ` ${escHtml(an.language.toUpperCase())}` : '';
     const when = an.voice_only && an.classify && c.enabled ? ', when classified as voice' : '';
-    out += `<span class="an-badge" title="Transcribe: closed segments are transcribed with Whisper (${escHtml(langName(an.language || 'auto'))})${when}">📝${lang}</span>`;
+    out += `<span class="an-badge" title="Closed segments are transcribed with Whisper (${escHtml(langName(an.language || 'auto'))})${when}">📝 Transcribe${lang}</span>`;
   }
   return out;
 }
@@ -570,6 +570,7 @@ function segAnalysisHTML(seg) {
       const share = Math.round(labelShare(c) || 0);
       out += `<button class="an-label an-${AN_KEY(c.label)}" onclick="toggleSegDetail(this)" title="Show what was heard">${escHtml(AN_LABELS[c.label] || c.label)} ${share}%</button>`;
       out += windowStripHTML(c.windows);
+      if (c.tags && c.tags.length) out += `<span class="seg-tags">${tagChipsHTML(c.tags, 3)}</span>`;
     } else if (c.status === 'pending') {
       out += `<span class="an-label an-pending" title="Classification queued">Classifying…</span>`;
     } else {
@@ -614,6 +615,46 @@ function segDetailHTML(seg) {
     parts.push(`<div class="an-detail-line an-muted">Transcription ${escHtml(t.status)}${t.reason ? ': ' + escHtml(t.reason) : ''}</div>`);
   }
   return parts.join('');
+}
+
+// Tag chips, the first `n` (all when n is 0).
+function tagChipsHTML(tags, n) {
+  const list = n ? (tags || []).slice(0, n) : (tags || []);
+  return list.map(t => `<span class="an-tag">${escHtml(t)}</span>`).join(' ');
+}
+
+function fmtAgo(date) {
+  const s = Math.max(0, (Date.now() - date.getTime()) / 1000);
+  if (s < 90) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return date.toLocaleString();
+}
+
+// The channel card's "Last heard" line: its latest classified segment, for
+// everyone, logged in or not. lh is the server's last_heard.
+function lastHeardHTML(lh) {
+  if (!lh || !lh.label) return '';
+  const share = Math.round(labelShare(lh) || 0);
+  const end = new Date(new Date(lh.started_at).getTime() + (lh.duration_sec || 0) * 1000);
+  const line = lh.last_line
+    ? `<div class="ch-last-line" title="Latest transcript line">“${escHtml(lh.last_line)}”</div>` : '';
+  return `<div class="ch-last-heard" title="The latest segment classified on this channel">
+      <span class="ch-last-title">Last heard</span>
+      <span class="an-label an-${AN_KEY(lh.label)}">${escHtml(AN_LABELS[lh.label] || lh.label)} ${share}%</span>
+      ${tagChipsHTML(lh.tags, 3)}
+      <span class="an-muted">${escHtml(fmtAgo(end))}</span>
+      ${line}
+    </div>`;
+}
+
+function setChannelLastHeard(card, lh) {
+  const wrap = card && card.querySelector('.ch-last-heard-wrap');
+  if (!wrap || !lh) return;
+  const t = new Date(lh.started_at).getTime();
+  if (card._lastHeardAt && t < card._lastHeardAt) return; // keep the newer one
+  card._lastHeardAt = t;
+  wrap.innerHTML = lastHeardHTML(lh);
 }
 
 function toggleSegDetail(btn) {
@@ -708,7 +749,7 @@ function renderSessionAnalysis(card) {
   const soFar = live ? ' so far' : '';
   if (chip) {
     chip.innerHTML = sum.label
-      ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])}</span>`
+      ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])} ${Math.round(Math.max(sum.vp, sum.mp, sum.zp))}%</span> ${tagChipsHTML(sum.tags.map(([t]) => t), 3)}`
       : '';
   }
   const bar = sum.classifiedSec ? `
@@ -876,6 +917,7 @@ function renderChannels(channels) {
       }
       const snrEl = existingCard.querySelector('.ch-snr');
       if (snrEl) snrEl.textContent = 'SNR: ' + fmtSNR(ch.snr);
+      if (ch.last_heard) setChannelLastHeard(existingCard, ch.last_heard);
 
       // Ensure correct DOM position.
       const cards = Array.from(grid.querySelectorAll('.channel-card'));
@@ -970,6 +1012,7 @@ function renderChannels(channels) {
       : bwCfg(mode).default;
     const bwDisplay = fmtBW(effectiveBwHz);
 
+    if (ch.last_heard) card._lastHeardAt = new Date(ch.last_heard.started_at).getTime();
     card.innerHTML = `
       <div class="ch-label-row">
         <div class="ch-label">${ch.label}</div>
@@ -990,6 +1033,7 @@ function renderChannels(channels) {
       </div>
       <span class="ch-status ${statusClass}">${statusLabel}</span>
       ${schedNextHint}
+      <div class="ch-last-heard-wrap">${lastHeardHTML(ch.last_heard)}</div>
       <div class="ch-snr">SNR: ${fmtSNR(ch.snr)}</div>
       <canvas class="ch-snr-chart" height="32" title="Rolling 10s SNR (30 dB=red → 60 dB=green)"></canvas>
       <div class="ch-actions">
@@ -1487,10 +1531,14 @@ function stopLivePlayer(card) {
 function showAddChannelForm() {
   document.getElementById('add-channel-form').classList.remove('hidden');
   // Analysis section, rebuilt each time so it reflects what the host offers.
-  // A new channel transcribes only voice by default when both are chosen.
+  // A new channel is classified by default (when the host offers it) but not
+  // transcribed; if transcription is added, it covers only voice by default.
   const anMount = document.getElementById('add-analysis-mount');
   if (anMount) {
-    anMount.innerHTML = buildAnalysisFields({ voice_only: true });
+    anMount.innerHTML = buildAnalysisFields({
+      classify: !!(analysisState.classify || {}).enabled,
+      voice_only: true,
+    });
     wireAnalysisFields(anMount);
   }
   document.getElementById('add-name').focus();
@@ -3276,6 +3324,18 @@ function connectSSE() {
           det.classList.toggle('hidden', !(open && det.innerHTML));
         }
       });
+      // The channel card's "Last heard" line.
+      const c = d.analysis && d.analysis.classification;
+      if (c && c.status === 'done' && d.channel_id) {
+        const t = d.analysis.transcript;
+        const lines = t && t.status === 'done' && t.lines ? t.lines : [];
+        document.querySelectorAll(`.channel-card[data-channel-id="${CSS.escape(d.channel_id)}"]`).forEach(card =>
+          setChannelLastHeard(card, {
+            started_at: d.started_at, duration_sec: d.duration_sec, label: c.label,
+            voice_pct: c.voice_pct, music_pct: c.music_pct, noise_pct: c.noise_pct,
+            tags: c.tags, last_line: lines.length ? lines[lines.length - 1] : '',
+          }));
+      }
       // Keep the session card's segments current and its recording summary
       // (so far, for a live recording) in step.
       document.querySelectorAll('.session-card').forEach(card => {

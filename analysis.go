@@ -527,10 +527,12 @@ func (a *analyzer) update(recID string, fn func(*segmentAnalysis)) {
 	a.hub.broadcast(sseEvent{
 		Event: "recording_analysed",
 		Data: map[string]interface{}{
-			"id":         rec.ID,
-			"channel_id": rec.ChannelID,
-			"session_id": rec.SessionID,
-			"analysis":   rec.Analysis,
+			"id":           rec.ID,
+			"channel_id":   rec.ChannelID,
+			"session_id":   rec.SessionID,
+			"started_at":   rec.StartedAt,
+			"duration_sec": rec.DurationSec,
+			"analysis":     rec.Analysis,
 		},
 	})
 }

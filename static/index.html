@@ -4,12 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AirSplice — Multi-Channel Audio Recorder</title>
-  <link rel="stylesheet" href="{{.BasePath}}/static/style.css" />
+  <link rel="stylesheet" href="{{.BasePath}}/static/style.css?v={{.AssetVersion}}" />
 </head>
 <body>
   <header>
     <h1>🎙 AirSplice</h1>
-    <p class="subtitle">Multi-Channel Audio Recorder</p>
+    <p class="subtitle">Multi-Channel Audio Recorder <span class="app-version" title="airsplice build">{{.Version}}</span></p>
     <div id="auth-bar"></div>
   </header>
 
@@ -134,6 +134,6 @@
   <script>
     window.BASE_PATH = "{{.BasePath}}";
   </script>
-  <script src="{{.BasePath}}/static/app.js"></script>
+  <script src="{{.BasePath}}/static/app.js?v={{.AssetVersion}}"></script>
 </body>
 </html>

@@ -857,6 +857,9 @@ func (c *recChannel) statusSnapshot() map[string]interface{} {
 
 	// Analysis opt-in (the host-wide switches are in GET /api/analysis).
 	snap["analysis"] = c.getAnalysis()
+	if lh := c.store.latestHeard(c.channelID); lh != nil {
+		snap["last_heard"] = lh // shown on the channel card, to everyone
+	}
 
 	// Schedule state.
 	sched := c.getSchedule()
