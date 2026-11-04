@@ -422,11 +422,12 @@ func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcri
 		return fail(analysisFailed, "transcription unavailable: "+errMsg)
 	}
 
-	audio, rate, err := readWAVMono(j.wavPath)
+	wav, err := openWAVStream(j.wavPath)
 	if err != nil {
 		return fail(analysisFailed, err.Error())
 	}
-	audio = resample(audio, rate, analysisRate)
+	defer wav.Close()
+	audio := newResampledReader(wav, wav.rate, analysisRate) // streamed, 100 ms at a time
 
 	w.procMu.Lock()
 	defer w.procMu.Unlock()
@@ -486,21 +487,26 @@ func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcri
 	pcm := make([]byte, whisperFrameSamples*2)
 	frameDur := time.Duration(float64(time.Second) * float64(whisperFrameSamples) / analysisRate / w.settings.WhisperSpeed)
 	t0 := time.Now()
-	total := len(audio) + whisperTailSilence
-	for i, k := 0, 0; i < total; i, k = i+whisperFrameSamples, k+1 {
+	silence := whisperTailSilence // sent once the audio runs out
+	for k := 0; ; k++ {
 		if ctx.Err() != nil {
 			_ = writeFrame(w.stdin, frameStop, nil)
 			return fail(analysisSkipped, "shutting down")
 		}
-		n := whisperFrameSamples
-		if i+n > total {
-			n = total - i
+		frame, rerr := audio.next(whisperFrameSamples)
+		if rerr != nil {
+			_ = writeFrame(w.stdin, frameStop, nil)
+			return fail(analysisFailed, rerr.Error())
 		}
-		for s := 0; s < n; s++ {
-			var v float32
-			if i+s < len(audio) {
-				v = audio[i+s]
+		if len(frame) == 0 {
+			if silence <= 0 {
+				break
 			}
+			frame = make([]float32, min(whisperFrameSamples, silence))
+			silence -= len(frame)
+		}
+		n := len(frame)
+		for s, v := range frame {
 			binary.LittleEndian.PutUint16(pcm[2*s:], uint16(floatToInt16(v)))
 		}
 		if err := writeFrame(w.stdin, frameAudio, pcm[:2*n]); err != nil {

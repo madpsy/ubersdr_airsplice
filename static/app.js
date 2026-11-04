@@ -539,40 +539,87 @@ function channelAnalysisBadges(ch) {
 }
 
 const AN_LABELS = { voice: 'Voice', music: 'Music', 'voice+music': 'Voice + music', noise: 'Noise' };
+const AN_KEY = l => (l || 'noise').replace('+', '-');
+const CLASSIFIER_WINDOW_SEC = backend => (backend || '').startsWith('dsp') ? 5 : 10;
 
-// A segment row's analysis cell: classification badge and transcript button.
+// The share a label stands for, for the badge: "Voice 80%".
+function labelShare(c) {
+  switch (c.label) {
+    case 'voice': return c.voice_pct;
+    case 'music': return c.music_pct;
+    case 'noise': return c.noise_pct;
+    default:      return (c.voice_pct || 0) + (c.music_pct || 0);
+  }
+}
+
+// A strip of coloured cells, one per classified window, in order.
+function windowStripHTML(windows, extraClass) {
+  if (!windows || !windows.length) return '';
+  const cells = windows.map(w => `<i class="an-${AN_KEY(w)}"></i>`).join('');
+  return `<span class="an-strip ${extraClass || ''}" aria-hidden="true">${cells}</span>`;
+}
+
+// A segment row's analysis cell: label badge (click for details), window
+// strip and transcript button. Visible to everyone, logged in or not.
 function segAnalysisHTML(seg) {
   const a = (seg && seg.analysis) || {};
   let out = '';
   const c = a.classification;
   if (c) {
     if (c.status === 'done') {
-      const pct = v => Math.round(v || 0);
-      let title = `voice ${pct(c.voice_pct)}% · music ${pct(c.music_pct)}% · noise ${pct(c.noise_pct)}% — ${c.backend || ''}`;
-      if (c.band_hz && c.band_hz.length === 2) title += `, ${c.band_hz[0]}-${c.band_hz[1]} Hz`;
-      if (c.tags && c.tags.length) title += `\nHeard: ${c.tags.join(', ')}`;
-      if (c.reason) title += `\n${c.reason}`;
-      const key = (c.label || 'noise').replace('+', '-');
-      out += `<span class="an-label an-${key}" title="${escHtml(title)}">${escHtml(AN_LABELS[c.label] || c.label)}</span>`;
+      const share = Math.round(labelShare(c) || 0);
+      out += `<button class="an-label an-${AN_KEY(c.label)}" onclick="toggleSegDetail(this)" title="Show what was heard">${escHtml(AN_LABELS[c.label] || c.label)} ${share}%</button>`;
+      out += windowStripHTML(c.windows);
     } else if (c.status === 'pending') {
-      out += `<span class="an-label an-pending" title="Classification queued">⋯</span>`;
+      out += `<span class="an-label an-pending" title="Classification queued">Classifying…</span>`;
     } else {
-      out += `<span class="an-label an-${c.status}" title="Classification ${c.status}: ${escHtml(c.reason || '')}">${c.status === 'failed' ? '⚠' : '–'}</span>`;
+      out += `<button class="an-label an-${c.status}" onclick="toggleSegDetail(this)">${c.status === 'failed' ? '⚠ Not classified' : 'Not classified'}</button>`;
     }
   }
   const t = a.transcript;
   if (t) {
     if (t.status === 'done' && t.text) {
-      out += `<button class="an-tx-btn" onclick="toggleTranscript(this)" title="Show the transcript${t.partial ? ' (partial)' : ''}">📝${t.partial ? '*' : ''}</button>`;
+      out += `<button class="an-tx-btn" onclick="toggleTranscript(this)">📝 Transcript${t.partial ? '*' : ''}</button>`;
     } else if (t.status === 'done') {
-      out += `<span class="an-label an-skipped" title="Transcribed: no speech recognised">📝 –</span>`;
+      out += `<span class="an-label an-skipped">No speech</span>`;
     } else if (t.status === 'pending') {
-      out += `<span class="an-label an-pending" title="Transcription queued">📝 ⋯</span>`;
+      out += `<span class="an-label an-pending" title="Transcription queued">Transcribing…</span>`;
     } else {
-      out += `<span class="an-label an-${t.status}" title="Transcription ${t.status}: ${escHtml(t.reason || '')}">📝 ${t.status === 'failed' ? '⚠' : '–'}</span>`;
+      out += `<button class="an-label an-${t.status}" onclick="toggleSegDetail(this)" title="${escHtml(t.reason || '')}">${t.status === 'failed' ? '⚠ No transcript' : 'No transcript'}</button>`;
     }
   }
   return out;
+}
+
+// The details line under a segment row, opened from its badge.
+function segDetailHTML(seg) {
+  const a = (seg && seg.analysis) || {};
+  const parts = [];
+  const c = a.classification;
+  if (c && c.status === 'done') {
+    const pct = v => Math.round(v || 0);
+    const n = (c.windows || []).length, w = CLASSIFIER_WINDOW_SEC(c.backend);
+    parts.push(`<div class="an-detail-line"><b>${escHtml(AN_LABELS[c.label] || c.label)}</b> — voice ${pct(c.voice_pct)}% · music ${pct(c.music_pct)}% · noise ${pct(c.noise_pct)}%
+      <span class="an-muted">(${n} window${n !== 1 ? 's' : ''} of ${w} s · ${escHtml(CLASSIFIER_NAMES[(c.backend || '').split('+')[0]] || c.backend || '')}${(c.backend || '').endsWith('+snr') ? ' · low SNR, counted as noise' : ''})</span></div>`);
+    if (c.windows && c.windows.length) parts.push(`<div class="an-detail-line">${windowStripHTML(c.windows, 'an-strip-wide')}</div>`);
+    if (c.tags && c.tags.length) {
+      parts.push(`<div class="an-detail-line">Heard: ${c.tags.map(t => `<span class="an-tag">${escHtml(t)}</span>`).join(' ')}</div>`);
+    }
+    if (c.reason) parts.push(`<div class="an-detail-line an-muted">${escHtml(c.reason)}</div>`);
+  } else if (c && c.status !== 'pending') {
+    parts.push(`<div class="an-detail-line an-muted">Classification ${escHtml(c.status)}${c.reason ? ': ' + escHtml(c.reason) : ''}</div>`);
+  }
+  const t = a.transcript;
+  if (t && (t.status === 'skipped' || t.status === 'failed')) {
+    parts.push(`<div class="an-detail-line an-muted">Transcription ${escHtml(t.status)}${t.reason ? ': ' + escHtml(t.reason) : ''}</div>`);
+  }
+  return parts.join('');
+}
+
+function toggleSegDetail(btn) {
+  const row = btn.closest('.seg-row');
+  const d = row && row.querySelector('.seg-an-detail');
+  if (d && d.innerHTML.trim()) d.classList.toggle('hidden');
 }
 
 // The transcript block under a segment row (empty when there is none).
@@ -589,6 +636,119 @@ function segTranscriptHTML(seg) {
 function toggleTranscript(btn) {
   const row = btn.closest('.seg-row');
   const tx = row && row.querySelector('.seg-transcript');
+  if (tx && tx.innerHTML.trim()) tx.classList.toggle('hidden');
+}
+
+// ── Recording summary: what the whole recording (so far) contains ──────────
+//
+// Computed here from the card's segments (the server sends the same summary as
+// session.analysis for other consumers), so it follows each result as it
+// arrives over SSE — a live recording's summary grows segment by segment.
+
+function summarizeSegments(segs) {
+  let seen = false, classifiedSec = 0, v = 0, m = 0, z = 0;
+  let classified = 0, pending = 0, skipped = 0, failed = 0, transcribed = 0, lines = 0, partial = 0;
+  const tags = {};
+  const tx = [];
+  for (const seg of segs || []) {
+    if (seg._live || !seg.analysis) continue;
+    seen = true;
+    const c = seg.analysis.classification, t = seg.analysis.transcript;
+    const statuses = new Set();
+    if (c) {
+      if (c.status === 'done') {
+        classified++;
+        const d = seg.duration_sec || 0;
+        classifiedSec += d;
+        v += d * (c.voice_pct || 0); m += d * (c.music_pct || 0); z += d * (c.noise_pct || 0);
+        (c.tags || []).forEach(tag => { tags[tag] = (tags[tag] || 0) + 1; });
+      } else statuses.add(c.status);
+    }
+    if (t) {
+      if (t.status === 'done') {
+        transcribed++;
+        if (t.partial) partial++;
+        const ls = t.lines && t.lines.length ? t.lines : (t.text ? [t.text] : []);
+        lines += ls.length;
+        if (ls.length) tx.push({ at: seg.started_at, lines: ls });
+      } else statuses.add(t.status);
+    }
+    if (statuses.has('pending')) pending++;
+    if (statuses.has('skipped')) skipped++;
+    if (statuses.has('failed')) failed++;
+  }
+  if (!seen) return null;
+  const share = x => classifiedSec ? x / classifiedSec : 0;
+  const vp = share(v), mp = share(m), zp = share(z);
+  let label = '';
+  if (classifiedSec) {
+    label = zp >= 60 ? 'noise' : (vp >= 25 && mp >= 25) ? 'voice+music' : vp >= mp ? 'voice' : 'music';
+  }
+  const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return { label, vp, mp, zp, classified, classifiedSec, pending, skipped, failed, transcribed, lines, partial, tags: tagList, tx };
+}
+
+function fmtClock(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderSessionAnalysis(card) {
+  const box = card.querySelector('.sess-analysis');
+  const chip = card.querySelector('.sess-an-chip');
+  if (!box) return;
+  const live = card.classList.contains('session-live');
+  const sum = summarizeSegments(card._segments);
+  if (!sum) {
+    box.innerHTML = '';
+    box.classList.add('hidden');
+    if (chip) chip.innerHTML = '';
+    return;
+  }
+  const soFar = live ? ' so far' : '';
+  if (chip) {
+    chip.innerHTML = sum.label
+      ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])}</span>`
+      : '';
+  }
+  const bar = sum.classifiedSec ? `
+    <div class="sa-bar" role="img" aria-label="voice ${Math.round(sum.vp)}%, music ${Math.round(sum.mp)}%, noise ${Math.round(sum.zp)}%">
+      <i class="an-voice" style="width:${sum.vp}%"></i><i class="an-music" style="width:${sum.mp}%"></i><i class="an-noise" style="width:${sum.zp}%"></i>
+    </div>
+    <div class="sa-legend">
+      <span><i class="sa-dot an-voice"></i>Voice ${Math.round(sum.vp)}%</span>
+      <span><i class="sa-dot an-music"></i>Music ${Math.round(sum.mp)}%</span>
+      <span><i class="sa-dot an-noise"></i>Noise ${Math.round(sum.zp)}%</span>
+    </div>` : '';
+  const counts = [`${sum.classified} segment${sum.classified !== 1 ? 's' : ''} classified (${fmtDuration(sum.classifiedSec)})`];
+  if (sum.pending) counts.push(`${sum.pending} in progress`);
+  if (sum.skipped) counts.push(`${sum.skipped} skipped`);
+  if (sum.failed) counts.push(`${sum.failed} failed`);
+  const tags = sum.tags.length
+    ? `<div class="sa-tags"><span class="sa-sub">Heard${soFar}:</span> ${sum.tags.map(([t, n]) =>
+        `<span class="an-tag" title="Among the strongest sounds in ${n} segment${n !== 1 ? 's' : ''}">${escHtml(t)} <b>${n}</b></span>`).join(' ')}</div>`
+    : '';
+  const wasOpen = box.querySelector('.sa-transcript:not(.hidden)') != null;
+  const txBtn = sum.lines
+    ? `<button class="an-tx-btn sa-tx-btn" onclick="toggleSessionTranscript(this)">📝 Transcript of the recording${soFar} (${sum.lines} line${sum.lines !== 1 ? 's' : ''})</button>`
+    : (sum.transcribed ? '<span class="an-muted">Transcribed: no speech recognised</span>' : '');
+  const txBody = sum.tx.map(seg => `
+      <div class="sa-tx-seg"><span class="sa-tx-time">${escHtml(fmtClock(seg.at))}</span>
+        <div>${seg.lines.map(l => `<p>${escHtml(l)}</p>`).join('')}</div></div>`).join('')
+    + (sum.partial ? `<div class="an-tx-meta">${sum.partial} segment${sum.partial !== 1 ? 's' : ''} partial: the transcriber fell behind and skipped some audio</div>` : '');
+  box.innerHTML = `
+    <div class="sa-head"><span class="an-title">Recording${soFar}</span>
+      ${sum.label ? `<span class="an-label an-${AN_KEY(sum.label)}">${escHtml(AN_LABELS[sum.label])}</span>` : ''}
+      <span class="an-muted">${counts.join(' · ')}</span></div>
+    ${bar}
+    ${tags}
+    ${txBtn}
+    <div class="sa-transcript seg-transcript${wasOpen ? '' : ' hidden'}">${txBody}</div>`;
+  box.classList.remove('hidden');
+}
+
+function toggleSessionTranscript(btn) {
+  const tx = btn.closest('.sess-analysis').querySelector('.sa-transcript');
   if (tx && tx.innerHTML.trim()) tx.classList.toggle('hidden');
 }
 
@@ -1691,6 +1851,7 @@ function renderSessions(sessions) {
         .slice()
         .sort((a, b) => new Date(a.started_at) - new Date(b.started_at));
       existing._segments = updatedSegs;
+      renderSessionAnalysis(existing);
       // Update live badge and segment count in header without rebuilding the card.
       const countEl = existing.querySelector('.sess-count');
       if (countEl) countEl.textContent = `${ss.segment_count} segment${ss.segment_count !== 1 ? 's' : ''}`;
@@ -1778,6 +1939,7 @@ function renderSessionCard(ss, container) {
       <span class="sess-time">${fmtDate(ss.started_at)}</span>
       <span class="sess-dur">${fmtDuration(ss.duration_sec)}</span>
       <span class="sess-snr">SNR: ${fmtSNR(ss.snr)}</span>
+      <span class="sess-an-chip"></span>
       <span class="sess-sel-time"></span>
       <span class="sess-count">${ss.segment_count} segment${ss.segment_count !== 1 ? 's' : ''}</span>
     </div>
@@ -1792,6 +1954,7 @@ function renderSessionCard(ss, container) {
       </div>
       ${deleteBtn}
     </div>
+    <div class="sess-analysis hidden"></div>
     <div class="session-player">
       <div class="snr-timeline-wrap">
         <canvas class="snr-timeline" height="72" title="Click to seek to that time"></canvas>
@@ -1820,6 +1983,7 @@ function renderSessionCard(ss, container) {
   card._segments = (ss.segments || [])
     .slice()
     .sort((a, b) => new Date(a.started_at) - new Date(b.started_at));
+  renderSessionAnalysis(card);
 
   // Wire seeked/play listeners on the session audio element so the playhead
   // loop restarts after a native seek-bar drag or play-after-pause.
@@ -1883,6 +2047,7 @@ function renderSessionCard(ss, container) {
         <div class="seg-player hidden">
           <audio controls preload="none" class="seg-audio" src="${dlUrl}"></audio>
         </div>
+        <div class="seg-an-detail hidden">${segDetailHTML(seg)}</div>
         <div class="seg-transcript hidden">${segTranscriptHTML(seg)}</div>`;
     }
     segContainer.appendChild(row);
@@ -3056,8 +3221,19 @@ function deleteSession(cardKey) {
 
 // ── SSE live feed ─────────────────────────────────────────────────────────────
 
+// Set when the live feed drops; on reconnecting, everything is reloaded so
+// results produced while it was down (a server restart, a network blip) show.
+let sseReconnecting = false;
+
 function connectSSE() {
   const es = new EventSource(BASE + '/api/live');
+  es.onopen = () => {
+    if (!sseReconnecting) return;
+    sseReconnecting = false;
+    loadChannels();
+    loadAnalysis();
+    loadRecordings();
+  };
 
   es.addEventListener('recording_saved', e => {
     loadChannels();
@@ -3093,10 +3269,19 @@ function connectSSE() {
           tx.innerHTML = segTranscriptHTML(seg);
           tx.classList.toggle('hidden', !(open && tx.innerHTML));
         }
+        const det = row.querySelector('.seg-an-detail');
+        if (det) {
+          const open = !det.classList.contains('hidden');
+          det.innerHTML = segDetailHTML(seg);
+          det.classList.toggle('hidden', !(open && det.innerHTML));
+        }
       });
-      // Keep the session card's segment list current for later re-renders.
+      // Keep the session card's segments current and its recording summary
+      // (so far, for a live recording) in step.
       document.querySelectorAll('.session-card').forEach(card => {
-        (card._segments || []).forEach(s => { if (s.id === d.id) s.analysis = d.analysis; });
+        let hit = false;
+        (card._segments || []).forEach(s => { if (s.id === d.id) { s.analysis = d.analysis; hit = true; } });
+        if (hit) renderSessionAnalysis(card);
       });
     } catch (_) {}
   });
@@ -3168,6 +3353,7 @@ function connectSSE() {
   });
 
   es.onerror = () => {
+    sseReconnecting = true;
     setTimeout(connectSSE, 5000);
     es.close();
   };

@@ -768,3 +768,44 @@ func TestModelsLoadOnlyWhenAChannelOptsIn(t *testing.T) {
 		t.Fatalf("classify status %v", snap)
 	}
 }
+
+func TestSummarizeAnalysis(t *testing.T) {
+	seg := func(dur float64, an *segmentAnalysis) *recordingRecord {
+		return &recordingRecord{DurationSec: dur, Analysis: an}
+	}
+	done := func(v, m, z float64, tags ...string) *classificationResult {
+		return &classificationResult{Status: analysisDone, VoicePct: v, MusicPct: m, NoisePct: z, Tags: tags}
+	}
+	if summarizeAnalysis([]*recordingRecord{seg(300, nil)}) != nil {
+		t.Fatal("a recording with no analysis got a summary")
+	}
+	sa := summarizeAnalysis([]*recordingRecord{
+		seg(300, &segmentAnalysis{Classification: done(100, 0, 0, "Speech", "Radio"),
+			Transcript: &transcriptResult{Status: analysisDone, Lines: []string{"a", "b"}}}),
+		seg(100, &segmentAnalysis{Classification: done(0, 100, 0, "Music", "Radio"),
+			Transcript: &transcriptResult{Status: analysisSkipped}}),
+		seg(100, &segmentAnalysis{Classification: done(0, 0, 100, "Static")}),
+		seg(300, &segmentAnalysis{Classification: &classificationResult{Status: analysisPending},
+			Transcript: &transcriptResult{Status: analysisPending}}),
+		seg(300, nil),
+	})
+	// Weighted by duration: 300 s voice, 100 s music, 100 s noise of 500 s classified.
+	if sa.VoicePct != 60 || sa.MusicPct != 20 || sa.NoisePct != 20 || sa.Label != "voice" {
+		t.Fatalf("shares %+v", sa)
+	}
+	if sa.Classified != 3 || sa.ClassifiedSec != 500 || sa.Pending != 1 || sa.Skipped != 1 || sa.Failed != 0 {
+		t.Fatalf("counts %+v", sa)
+	}
+	if sa.Transcribed != 1 || sa.TranscriptLines != 2 {
+		t.Fatalf("transcripts %+v", sa)
+	}
+	want := []tagCount{{"Radio", 2}, {"Music", 1}, {"Speech", 1}, {"Static", 1}}
+	if len(sa.Tags) != len(want) {
+		t.Fatalf("tags %v", sa.Tags)
+	}
+	for i := range want {
+		if sa.Tags[i] != want[i] {
+			t.Fatalf("tags %v, want %v", sa.Tags, want)
+		}
+	}
+}

@@ -450,6 +450,21 @@ func (m *channelManager) load() {
 // main
 // ---------------------------------------------------------------------------
 
+// maxSegmentSecs caps a segment at one hour. A session still runs on across
+// its segments; the cap keeps each file a manageable size to play, download
+// and analyse, and far from the 4 GiB a WAV file can hold (~25 h at 24 kHz).
+const maxSegmentSecs = 3600
+
+// normalizeSegmentSecs applies the cap. 0 and negative values used to mean one
+// unbroken file; they now mean the longest segment allowed.
+func normalizeSegmentSecs(s int) int {
+	if s <= 0 || s > maxSegmentSecs {
+		log.Printf("[main] SEGMENT_SECS=%d: segments are capped at %d s (one hour); using %d", s, maxSegmentSecs, maxSegmentSecs)
+		return maxSegmentSecs
+	}
+	return s
+}
+
 func envBoolOr(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -488,7 +503,7 @@ func main() {
 			"Password required for write actions in the web UI (env: UI_PASSWORD; empty = write actions disabled)")
 
 		segmentSecs = flag.Int("segment-secs", envIntOr("SEGMENT_SECS", 300),
-			"Recording segment length in seconds; 0 = continuous (env: SEGMENT_SECS)")
+			"Recording segment length in seconds, 1-3600; longer, 0 or negative means 3600 (env: SEGMENT_SECS)")
 
 		cleanupAllDays = flag.Int("cleanup-all-days", envIntOr("CLEANUP_ALL_DAYS", 30),
 			"Delete ALL recordings older than N days; 0 = disabled (env: CLEANUP_ALL_DAYS)")
@@ -525,6 +540,8 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	*segmentSecs = normalizeSegmentSecs(*segmentSecs)
 
 	anSettings := analysisSettings{
 		Classify:        *classify,

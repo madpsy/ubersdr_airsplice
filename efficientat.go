@@ -742,24 +742,27 @@ const eatMinScore = 0.12
 // classifyEAT labels a segment with the model, in 10 s windows (NightDX's
 // classify_ast). audio is at analysisRate; it is resampled to 32 kHz here.
 func (m *eatModel) classify(audio []float32, rate int) *classificationResult {
-	x := resample(audio, rate, eatRate)
-	win := int(eatWindow * eatRate)
+	res, _ := m.classifyFrom(newResampledReader(&sliceSource{x: audio}, rate, eatRate))
+	return res
+}
+
+// classifyFrom classifies a stream already resampled to 32 kHz, one 10 s
+// window at a time, so memory does not grow with the segment.
+func (m *eatModel) classifyFrom(r *resampledReader) (*classificationResult, error) {
 	var windows []string
 	var confs []float64
 	tagScore := map[string]float64{}
-	stop := max(len(x)-win/2, 1)
-	for i := 0; i < stop; i += win {
-		end := min(i+win, len(x))
-		if end-i < eatRate { // under a second
-			continue
-		}
-		probs := m.predict(eatMelSpec(x[i:end]))
+	err := forEachWindow(r, int(eatWindow*eatRate), eatRate, func(x []float32) {
+		probs := m.predict(eatMelSpec(x))
 		label, conf, tags := eatWindowVerdict(probs)
 		windows = append(windows, label)
 		confs = append(confs, conf)
 		for _, t := range tags[:min(3, len(tags))] {
 			tagScore[t.label] += float64(t.score)
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	var conf float64
 	for _, c := range confs {
@@ -787,7 +790,7 @@ func (m *eatModel) classify(audio []float32, rate int) *classificationResult {
 			}
 		}
 	}
-	return res
+	return res, nil
 }
 
 // ── loading in the background ────────────────────────────────────────────────

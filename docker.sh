@@ -148,7 +148,7 @@ run_image() {
 #   UBERSDR_PASS      UberSDR bypass password (optional)
 #   OUTPUT_DIR        Output directory for recordings (default: /data)
 #   WEB_PORT          Web UI port (default: 6095)
-#   SEGMENT_SECS      WAV segment length in seconds; 0 = continuous (default: 300)
+#   SEGMENT_SECS      WAV segment length in seconds, max 3600 (default: 300)
 #   CLEANUP_ALL_DAYS  Delete recordings older than N days; 0 = disabled (default: 30)
 #   UI_PASSWORD       Password for write actions in the web UI (optional)
 

@@ -68,8 +68,8 @@ const (
 )
 
 // recChannel owns one UberSDR instance and writes its audio to WAV files.
-// When segmentSecs > 0 it rotates to a new file every segmentSecs seconds.
-// When segmentSecs == 0 it writes one continuous file until stopped.
+// It rotates to a new file every segmentSecs seconds (1-3600; main caps it at
+// one hour). A zero value, which only tests construct, writes one file.
 type recChannel struct {
 	inst        *instance
 	store       *recordingStore

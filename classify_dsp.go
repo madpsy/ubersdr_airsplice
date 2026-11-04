@@ -74,26 +74,23 @@ func analysisBand(mode string, bwHz int) (lo, hi float64) {
 }
 
 func classifyDSP(audio []float32, rate int, windowSec float64, lo, hi float64) *classificationResult {
-	win := int(windowSec * float64(rate))
+	res, _ := classifyDSPFrom(newResampledReader(&sliceSource{x: audio}, rate, rate), rate, windowSec, lo, hi)
+	return res
+}
+
+// classifyDSPFrom classifies a stream already at `rate`, window by window, so
+// memory does not grow with the segment.
+func classifyDSPFrom(r *resampledReader, rate int, windowSec float64, lo, hi float64) (*classificationResult, error) {
 	var windows []string
-	stop := len(audio) - win/2
-	if stop < 1 {
-		stop = 1
-	}
-	for i := 0; i < stop; i += win {
-		end := i + win
-		if end > len(audio) {
-			end = len(audio)
-		}
-		x := audio[i:end]
-		if len(x) < rate {
-			continue
-		}
+	err := forEachWindow(r, int(windowSec*float64(rate)), rate, func(x []float32) {
 		windows = append(windows, dspVerdict(dspWindowMetrics(x, rate, lo, hi)))
+	})
+	if err != nil {
+		return nil, err
 	}
 	res := foldWindows(windows, "dsp", 0.5)
 	res.BandHz = []int{int(lo), int(hi)}
-	return res
+	return res, nil
 }
 
 // foldWindows turns per-window verdicts into the segment's label (NightDX _fold).

@@ -1175,3 +1175,88 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 }
 .add-channel-fields .an-check.an-disabled { color: var(--muted); }
 .add-channel-fields .an-check input { min-width: 0; padding: 0; }
+
+/* ── Analysis: segment badges, window strips, details, recording summary ── */
+button.an-label { font: inherit; font-size: 0.72rem; font-weight: 600; cursor: pointer; }
+.an-label.an-pending, .an-label.an-failed, .an-label.an-skipped { background: transparent; }
+button.an-label:hover { filter: brightness(1.25); }
+.an-voice-music { background: #102434; }
+.an-muted { color: var(--muted); font-size: 0.75rem; }
+
+/* one cell per classified window, in order */
+.an-strip {
+  display: inline-flex;
+  width: 72px;
+  height: 10px;
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  vertical-align: middle;
+}
+.an-strip i, .sa-bar i { display: block; height: 100%; }
+.an-strip i { flex: 1 1 0; min-width: 0; }
+.an-strip i.an-voice,       .sa-bar i.an-voice,       .sa-dot.an-voice       { background: var(--accent2); }
+.an-strip i.an-music,       .sa-bar i.an-music,       .sa-dot.an-music       { background: #a78bfa; }
+.an-strip i.an-voice-music,                            .sa-dot.an-voice-music { background: #38bdf8; }
+.an-strip i.an-noise,       .sa-bar i.an-noise,       .sa-dot.an-noise       { background: #3a3f52; }
+.an-strip-wide { width: 100%; max-width: 640px; height: 12px; }
+
+.an-tag {
+  display: inline-block;
+  font-size: 0.72rem;
+  padding: 1px 8px;
+  margin: 1px 0;
+  border-radius: 10px;
+  background: #1e2333;
+  border: 1px solid var(--border);
+  color: var(--text);
+  white-space: nowrap;
+}
+.an-tag b { color: var(--muted); font-weight: 600; margin-left: 2px; }
+
+.seg-an-detail {
+  grid-column: 1 / -1;
+  font-size: 0.8rem;
+  background: rgba(0,0,0,0.2);
+  border-left: 2px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Recording summary on each session card — visible to everyone */
+.sess-an-chip:empty { display: none; }
+.sess-analysis {
+  margin: 0 16px 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sa-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sa-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: #1e2030;
+}
+.sa-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.78rem; color: var(--muted); }
+.sa-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.sa-tags { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.sa-sub { font-size: 0.75rem; color: var(--muted); margin-right: 2px; }
+.sa-tx-btn { align-self: flex-start; }
+.sa-transcript { max-height: 420px; overflow-y: auto; }
+.sa-tx-seg { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 2px 0; }
+.sa-tx-time { color: var(--muted); font-size: 0.75rem; padding-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+@media (max-width: 700px) {
+  .seg-row { grid-template-columns: 28px 1fr auto; }
+  .seg-row .seg-analysis { grid-column: 1 / -1; flex-wrap: wrap; }
+  .an-strip { width: 56px; }
+}

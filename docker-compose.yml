@@ -16,7 +16,7 @@ services:
       # UI_PASSWORD: ""          # Set to enable password-protected write actions in the web UI
       OUTPUT_DIR: "/data"
       # WEB_PORT: "6095"
-      # SEGMENT_SECS: "300"      # Rotate to a new WAV file every N seconds (0 = continuous)
+      # SEGMENT_SECS: "300"      # Rotate to a new WAV file every N seconds (max 3600 = one hour)
       # CLEANUP_ALL_DAYS: "30"   # Delete ALL recordings older than N days (0=disabled)
       MAX_STORAGE_MB: "20480"    # Maximum total storage in MB (20 GB); 0 = unlimited. Per-channel limits set via web UI.
       #

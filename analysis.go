@@ -28,8 +28,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -434,24 +436,36 @@ func (a *analyzer) classifyWorkerCtx(ctx context.Context) {
 
 func (a *analyzer) runClassify(ctx context.Context, j analysisJob) *classificationResult {
 	now := time.Now().UTC()
-	audio, rate, err := readWAVMono(j.wavPath)
-	if err != nil {
+	fail := func(err error) *classificationResult {
 		return &classificationResult{Status: analysisFailed, Reason: err.Error(), At: now}
+	}
+	// The segment is streamed, never read whole: memory stays a few windows
+	// however long it is.
+	wav, err := openWAVStream(j.wavPath)
+	if err != nil {
+		return fail(err)
+	}
+	defer wav.Close()
+	dsp := func() (*classificationResult, error) {
+		lo, hi := analysisBand(j.mode, j.bwHz)
+		return classifyDSPFrom(newResampledReader(wav, wav.rate, analysisRate), analysisRate, dspWindowSec, lo, hi)
 	}
 	var res *classificationResult
 	if a.eat != nil {
 		// The model resamples straight to its own 32 kHz.
 		if m, why := a.eat.get(ctx); m != nil {
-			res = m.classify(audio, rate)
+			res, err = m.classifyFrom(newResampledReader(wav, wav.rate, eatRate))
 		} else {
 			// Never lose a segment's label to the model: fall back, and say so.
-			lo, hi := analysisBand(j.mode, j.bwHz)
-			res = classifyDSP(resample(audio, rate, analysisRate), analysisRate, dspWindowSec, lo, hi)
-			res.Reason = fmt.Sprintf("%s unavailable (%s); used dsp", a.settings.ClassifyModel, why)
+			if res, err = dsp(); err == nil {
+				res.Reason = fmt.Sprintf("%s unavailable (%s); used dsp", a.settings.ClassifyModel, why)
+			}
 		}
 	} else {
-		lo, hi := analysisBand(j.mode, j.bwHz)
-		res = classifyDSP(resample(audio, rate, analysisRate), analysisRate, dspWindowSec, lo, hi)
+		res, err = dsp()
+	}
+	if err != nil {
+		return fail(err)
 	}
 	res.At = time.Now().UTC()
 	if j.snrCount > 0 && j.snrAvg < noiseSNRdB && res.Label != "noise" {
@@ -568,4 +582,113 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// sessionAnalysis summarises the analysis of a recording's segments: what the
+// recording as a whole (or so far) contains.
+type sessionAnalysis struct {
+	Label              string     `json:"label,omitempty"` // voice | music | voice+music | noise, time-weighted
+	VoicePct           float64    `json:"voice_pct"`
+	MusicPct           float64    `json:"music_pct"`
+	NoisePct           float64    `json:"noise_pct"`
+	ClassifiedSec      float64    `json:"classified_sec"`
+	Classified         int        `json:"classified"` // segments with a classification
+	Pending            int        `json:"pending"`    // still queued (classification or transcript)
+	Skipped            int        `json:"skipped"`
+	Failed             int        `json:"failed"`
+	Tags               []tagCount `json:"tags,omitempty"` // every distinct tag, most widespread first
+	Transcribed        int        `json:"transcribed"`    // segments with a finished transcript
+	TranscriptLines    int        `json:"transcript_lines"`
+	PartialTranscripts int        `json:"partial_transcripts,omitempty"`
+}
+
+type tagCount struct {
+	Tag      string `json:"tag"`
+	Segments int    `json:"segments"` // segments it was among the strongest tags of
+}
+
+// summarizeAnalysis folds segments' results into a sessionAnalysis: shares
+// weighted by segment duration, labelled by the same rule as a single segment
+// (foldWindows), and the union of their tags.
+func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
+	var sa sessionAnalysis
+	seen := false
+	tags := map[string]int{}
+	var v, m, z float64
+	for _, r := range segs {
+		an := r.Analysis
+		if an == nil {
+			continue
+		}
+		seen = true
+		counted := map[string]bool{}
+		count := func(status string) {
+			if counted[status] {
+				return
+			}
+			counted[status] = true
+			switch status {
+			case analysisPending:
+				sa.Pending++
+			case analysisSkipped:
+				sa.Skipped++
+			case analysisFailed:
+				sa.Failed++
+			}
+		}
+		if c := an.Classification; c != nil {
+			if c.Status == analysisDone {
+				sa.Classified++
+				d := r.DurationSec
+				sa.ClassifiedSec += d
+				v += d * c.VoicePct
+				m += d * c.MusicPct
+				z += d * c.NoisePct
+				for _, t := range c.Tags {
+					tags[t]++
+				}
+			} else {
+				count(c.Status)
+			}
+		}
+		if t := an.Transcript; t != nil {
+			if t.Status == analysisDone {
+				sa.Transcribed++
+				sa.TranscriptLines += len(t.Lines)
+				if t.Partial {
+					sa.PartialTranscripts++
+				}
+			} else {
+				count(t.Status)
+			}
+		}
+	}
+	if !seen {
+		return nil
+	}
+	if sa.ClassifiedSec > 0 {
+		sa.VoicePct = math.Round(v/sa.ClassifiedSec*10) / 10
+		sa.MusicPct = math.Round(m/sa.ClassifiedSec*10) / 10
+		sa.NoisePct = math.Round(z/sa.ClassifiedSec*10) / 10
+		switch {
+		case sa.NoisePct >= 60:
+			sa.Label = "noise"
+		case sa.VoicePct >= 25 && sa.MusicPct >= 25:
+			sa.Label = "voice+music"
+		case sa.VoicePct >= sa.MusicPct:
+			sa.Label = "voice"
+		default:
+			sa.Label = "music"
+		}
+	}
+	for t, n := range tags {
+		sa.Tags = append(sa.Tags, tagCount{t, n})
+	}
+	sort.Slice(sa.Tags, func(i, j int) bool {
+		if sa.Tags[i].Segments != sa.Tags[j].Segments {
+			return sa.Tags[i].Segments > sa.Tags[j].Segments
+		}
+		return sa.Tags[i].Tag < sa.Tags[j].Tag
+	})
+	return &sa
 }

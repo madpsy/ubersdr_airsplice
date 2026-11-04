@@ -415,6 +415,9 @@ type sessionSummary struct {
 	SegmentCount int                `json:"segment_count"`
 	SNR          SNRStats           `json:"snr"`
 	Segments     []*recordingRecord `json:"segments"`
+	// Analysis summarises its segments' classifications and transcripts (the
+	// recording so far, for a live one); nil when none was analysed.
+	Analysis *sessionAnalysis `json:"analysis,omitempty"`
 }
 
 // listByChannelID groups ALL segments for a channel_id UUID into a single
@@ -504,6 +507,7 @@ func (s *recordingStore) listByChannelID(channelID string, limit, offset int, da
 				Count: totalCount,
 			}
 		}
+		ss.Analysis = summarizeAnalysis(ss.Segments)
 	}
 
 	total := len(order)
@@ -598,6 +602,7 @@ func (s *recordingStore) listSessions(label string, limit, offset int, date stri
 				Count: totalCount,
 			}
 		}
+		ss.Analysis = summarizeAnalysis(ss.Segments)
 	}
 
 	total := len(order)
