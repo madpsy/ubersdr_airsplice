@@ -809,3 +809,36 @@ func TestSummarizeAnalysis(t *testing.T) {
 		}
 	}
 }
+
+func TestChannelRecordingAnalysis(t *testing.T) {
+	s := newTestStore(t)
+	add := func(id, sess string, start time.Time, tags ...string) {
+		r := &recordingRecord{ID: id, ChannelID: "ch1", SessionID: sess, StartedAt: start, DurationSec: 60,
+			Filename: id + ".wav", Analysis: &segmentAnalysis{Classification: &classificationResult{
+				Status: analysisDone, Label: "voice", VoicePct: 100, Tags: tags}}}
+		if err := s.add(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t0 := time.Now().Add(-time.Hour)
+	add("old1", "sessA", t0, "Music")
+	add("new1", "sessB", t0.Add(30*time.Minute), "Speech", "Radio")
+	add("new2", "sessB", t0.Add(35*time.Minute), "Speech", "Static")
+	ra := s.channelRecordingAnalysis("ch1")
+	if ra == nil || ra.Classified != 2 {
+		t.Fatalf("%+v", ra)
+	}
+	got := map[string]int{}
+	for _, tc := range ra.Tags {
+		got[tc.Tag] = tc.Segments
+	}
+	if len(got) != 3 || got["Speech"] != 2 || got["Radio"] != 1 || got["Static"] != 1 || got["Music"] != 0 {
+		t.Fatalf("tags of the latest recording: %v", got)
+	}
+	if lh := s.latestHeard("ch1"); lh == nil || lh.SegmentID != "new2" {
+		t.Fatalf("latest heard %+v", lh)
+	}
+	if s.channelRecordingAnalysis("other") != nil {
+		t.Fatal("a channel with no segments got a summary")
+	}
+}

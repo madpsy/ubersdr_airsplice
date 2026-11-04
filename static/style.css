@@ -1287,3 +1287,7 @@ button.an-label:hover { filter: brightness(1.25); }
 .sess-an-chip { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .seg-tags { display: inline-flex; gap: 3px; flex-wrap: wrap; }
 .seg-tags .an-tag, .sess-an-chip .an-tag, .ch-last-heard .an-tag { font-size: 0.7rem; padding: 0 7px; }
+
+.ch-rec-tags-wrap:empty { display: none; }
+.ch-rec-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 2px 0 4px; }
+.ch-rec-tags .an-tag { font-size: 0.7rem; padding: 0 7px; }

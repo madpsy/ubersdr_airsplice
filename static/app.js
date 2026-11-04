@@ -648,6 +648,23 @@ function lastHeardHTML(lh) {
     </div>`;
 }
 
+// The channel card's "This recording" line: every distinct sound heard in its
+// current recording, with the number of segments each was among the strongest
+// of. ra is the server's recording_analysis (a session summary).
+function recordingTagsHTML(ra, live) {
+  if (!ra || !ra.tags || !ra.tags.length) return '';
+  const chips = ra.tags.map(tc =>
+    `<span class="an-tag" title="Among the strongest sounds in ${tc.segments} segment${tc.segments !== 1 ? 's' : ''}">${escHtml(tc.tag)} <b>${tc.segments}</b></span>`).join(' ');
+  return `<div class="ch-rec-tags"><span class="ch-last-title">${live ? 'This recording' : 'Last recording'}</span> ${chips}</div>`;
+}
+
+// A new result for a channel refreshes the channel cards, at most every 2 s.
+let channelRefreshTimer = null;
+function scheduleChannelRefresh() {
+  if (channelRefreshTimer) return;
+  channelRefreshTimer = setTimeout(() => { channelRefreshTimer = null; loadChannels(); }, 2000);
+}
+
 function setChannelLastHeard(card, lh) {
   const wrap = card && card.querySelector('.ch-last-heard-wrap');
   if (!wrap || !lh) return;
@@ -918,6 +935,8 @@ function renderChannels(channels) {
       const snrEl = existingCard.querySelector('.ch-snr');
       if (snrEl) snrEl.textContent = 'SNR: ' + fmtSNR(ch.snr);
       if (ch.last_heard) setChannelLastHeard(existingCard, ch.last_heard);
+      const recTags = existingCard.querySelector('.ch-rec-tags-wrap');
+      if (recTags) recTags.innerHTML = recordingTagsHTML(ch.recording_analysis, ch.recording);
 
       // Ensure correct DOM position.
       const cards = Array.from(grid.querySelectorAll('.channel-card'));
@@ -1034,6 +1053,7 @@ function renderChannels(channels) {
       <span class="ch-status ${statusClass}">${statusLabel}</span>
       ${schedNextHint}
       <div class="ch-last-heard-wrap">${lastHeardHTML(ch.last_heard)}</div>
+      <div class="ch-rec-tags-wrap">${recordingTagsHTML(ch.recording_analysis, ch.recording)}</div>
       <div class="ch-snr">SNR: ${fmtSNR(ch.snr)}</div>
       <canvas class="ch-snr-chart" height="32" title="Rolling 10s SNR (30 dB=red → 60 dB=green)"></canvas>
       <div class="ch-actions">
@@ -3335,6 +3355,7 @@ function connectSSE() {
             voice_pct: c.voice_pct, music_pct: c.music_pct, noise_pct: c.noise_pct,
             tags: c.tags, last_line: lines.length ? lines[lines.length - 1] : '',
           }));
+        scheduleChannelRefresh(); // its "This recording" list
       }
       // Keep the session card's segments current and its recording summary
       // (so far, for a live recording) in step.

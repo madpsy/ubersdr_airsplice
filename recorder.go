@@ -860,6 +860,9 @@ func (c *recChannel) statusSnapshot() map[string]interface{} {
 	if lh := c.store.latestHeard(c.channelID); lh != nil {
 		snap["last_heard"] = lh // shown on the channel card, to everyone
 	}
+	if ra := c.store.channelRecordingAnalysis(c.channelID); ra != nil {
+		snap["recording_analysis"] = ra // everything heard in its current recording
+	}
 
 	// Schedule state.
 	sched := c.getSchedule()

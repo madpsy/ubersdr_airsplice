@@ -739,3 +739,31 @@ func (s *recordingStore) latestHeard(channelID string) *lastHeard {
 	}
 	return lh
 }
+
+// channelRecordingAnalysis summarises the analysis of a channel's current
+// recording: the session of its most recently started segment (the live
+// session while it records, the last one when idle). Nil if nothing in it was
+// analysed.
+func (s *recordingStore) channelRecordingAnalysis(channelID string) *sessionAnalysis {
+	if channelID == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var latest *recordingRecord
+	for _, r := range s.records {
+		if r.ChannelID == channelID && r.SessionID != "" && (latest == nil || r.StartedAt.After(latest.StartedAt)) {
+			latest = r
+		}
+	}
+	if latest == nil {
+		return nil
+	}
+	var segs []*recordingRecord
+	for _, r := range s.records {
+		if r.SessionID == latest.SessionID {
+			segs = append(segs, r)
+		}
+	}
+	return summarizeAnalysis(segs)
+}
