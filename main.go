@@ -500,8 +500,10 @@ func main() {
 		// opts in from the web UI.
 		classify = flag.Bool("classify", envBoolOr("CLASSIFY", false),
 			"Classify closed segments as voice/music/noise (env: CLASSIFY)")
-		classifyModel = flag.String("classify-model", envOr("CLASSIFY_MODEL", "dsp"),
+		classifyModel = flag.String("classify-model", envOr("CLASSIFY_MODEL", "mn10"),
 			"Classifier: "+strings.Join(classifyModels, ", ")+" (env: CLASSIFY_MODEL)")
+		classifyThreads = flag.Int("classify-threads", envIntOr("CLASSIFY_THREADS", 1),
+			"CPU threads for the classifier (env: CLASSIFY_THREADS)")
 		transcribe = flag.Bool("transcribe", envBoolOr("TRANSCRIBE", false),
 			"Transcribe closed segments with Whisper (env: TRANSCRIBE)")
 		whisperHelper = flag.String("whisper-helper", envOr("WHISPER_HELPER", "whisper-helper"),
@@ -525,14 +527,15 @@ func main() {
 	}
 
 	anSettings := analysisSettings{
-		Classify:       *classify,
-		ClassifyModel:  *classifyModel,
-		Transcribe:     *transcribe,
-		WhisperHelper:  *whisperHelper,
-		WhisperModel:   *whisperModel,
-		WhisperThreads: *whisperThreads,
-		WhisperSpeed:   *whisperSpeed,
-		ModelDir:       *modelDir,
+		Classify:        *classify,
+		ClassifyModel:   *classifyModel,
+		ClassifyThreads: *classifyThreads,
+		Transcribe:      *transcribe,
+		WhisperHelper:   *whisperHelper,
+		WhisperModel:    *whisperModel,
+		WhisperThreads:  *whisperThreads,
+		WhisperSpeed:    *whisperSpeed,
+		ModelDir:        *modelDir,
 	}
 	if anSettings.ModelDir == "" {
 		anSettings.ModelDir = filepath.Join(*outputDir, "models")

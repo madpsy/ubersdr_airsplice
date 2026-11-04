@@ -139,15 +139,17 @@ func resample(x []float32, from, to int) []float32 {
 		pos := int64(i) * int64(down)
 		base := int(pos / int64(up))
 		h := table[int(pos%int64(up))]
-		var acc float32
 		start := base - half
-		for k, hk := range h {
-			j := start + k
-			if j >= 0 && j < len(x) {
-				acc += hk * x[j]
-			}
+		k0, k1 := 0, taps // taps that land inside x
+		if start < 0 {
+			k0 = -start
 		}
-		out[i] = acc
+		if start+taps > len(x) {
+			k1 = len(x) - start
+		}
+		if k1 > k0 {
+			out[i] = f32Dot(h[k0:k1], x[start+k0:start+k1])
+		}
 	}
 	return out
 }

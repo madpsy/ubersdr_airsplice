@@ -224,9 +224,9 @@ func ensureModel(ctx context.Context, p modelPin, dest string, progress func(int
 		if sum, err := fileSHA256(dest); err == nil && sum == p.SHA256 {
 			return nil
 		}
-		log.Printf("[whisper] %s fails its checksum; downloading again", filepath.Base(dest))
+		log.Printf("[models] %s fails its checksum; downloading again", filepath.Base(dest))
 	}
-	log.Printf("[whisper] downloading %s (%.1f MB)", p.File, float64(p.Size)/1e6)
+	log.Printf("[models] downloading %s (%.1f MB)", p.File, float64(p.Size)/1e6)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
 	if err != nil {
 		return err

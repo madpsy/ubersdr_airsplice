@@ -356,7 +356,7 @@ const FALLBACK_LANGS = ['en', 'de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'pl', 'u
 
 function analysisSignature() {
   const c = analysisState.classify || {}, t = analysisState.transcribe || {};
-  return [c.enabled, c.model, t.enabled, t.model, t.state, (t.languages || []).length].join('|');
+  return [c.enabled, c.model, c.state, t.enabled, t.model, t.state, (t.languages || []).length].join('|');
 }
 
 function loadAnalysis() {
@@ -372,8 +372,15 @@ function loadAnalysis() {
       el.textContent = transcribeHostNote();
       el.classList.toggle('error', transcribeHostError());
     });
-    const st = (analysisState.transcribe || {}).state;
-    if (st === 'starting' || st === 'downloading') setTimeout(loadAnalysis, 3000);
+    document.querySelectorAll('.an-note-classify').forEach(el => {
+      el.textContent = classifyHostNote();
+      el.classList.toggle('error', classifyHostError());
+    });
+    // Poll while a model is downloading or loading.
+    const busy = st => st === 'starting' || st === 'downloading';
+    if (busy((analysisState.transcribe || {}).state) || busy((analysisState.classify || {}).state)) {
+      setTimeout(loadAnalysis, 3000);
+    }
   }).catch(e => console.warn('analysis:', e));
 }
 
@@ -386,9 +393,28 @@ function langName(code) {
   return code;
 }
 
+const CLASSIFIER_NAMES = {
+  dsp:  'DSP (no model)',
+  mn05: 'EfficientAT mn05',
+  mn10: 'EfficientAT mn10',
+  mn20: 'EfficientAT mn20',
+};
+
+function classifyHostError() {
+  const c = analysisState.classify || {};
+  return c.enabled && c.state === 'failed';
+}
+
 function classifyHostNote() {
   const c = analysisState.classify || {};
-  return c.enabled ? `Classifier: ${c.model}` : 'Off on this host (set CLASSIFY=true to enable)';
+  if (!c.enabled) return 'Off on this host (set CLASSIFY=true to enable)';
+  const name = CLASSIFIER_NAMES[c.model] || c.model;
+  switch (c.state) {
+    case 'starting':    return `Loading ${name}…`;
+    case 'downloading': return `Downloading ${name}… ${Math.round((c.progress || 0) * 100)}%`;
+    case 'failed':      return `${name} unavailable, using DSP: ${c.error || 'failed'}`;
+    default:            return `Classifier: ${name}` + (c.queued ? ` · ${c.queued} queued` : '');
+  }
 }
 
 function transcribeHostError() {
@@ -436,7 +462,7 @@ function buildAnalysisFields(an) {
         <input type="checkbox" class="an-classify"${an.classify ? ' checked' : ''}${c.enabled ? '' : ' disabled'} />
         Classify segments as voice / music / noise
       </label>
-      <div class="an-note">${escHtml(classifyHostNote())}</div>
+      <div class="an-note an-note-classify${classifyHostError() ? ' error' : ''}">${escHtml(classifyHostNote())}</div>
       <label class="an-check${t.enabled ? '' : ' an-disabled'}">
         <input type="checkbox" class="an-transcribe"${an.transcribe ? ' checked' : ''}${t.enabled ? '' : ' disabled'} />
         Transcribe speech
@@ -518,7 +544,8 @@ function segAnalysisHTML(seg) {
       const pct = v => Math.round(v || 0);
       let title = `voice ${pct(c.voice_pct)}% · music ${pct(c.music_pct)}% · noise ${pct(c.noise_pct)}% — ${c.backend || ''}`;
       if (c.band_hz && c.band_hz.length === 2) title += `, ${c.band_hz[0]}-${c.band_hz[1]} Hz`;
-      if (c.reason) title += ` — ${c.reason}`;
+      if (c.tags && c.tags.length) title += `\nHeard: ${c.tags.join(', ')}`;
+      if (c.reason) title += `\n${c.reason}`;
       const key = (c.label || 'noise').replace('+', '-');
       out += `<span class="an-label an-${key}" title="${escHtml(title)}">${escHtml(AN_LABELS[c.label] || c.label)}</span>`;
     } else if (c.status === 'pending') {

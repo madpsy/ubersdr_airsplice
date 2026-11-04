@@ -315,14 +315,26 @@ func TestValidateAnalysisConfig(t *testing.T) {
 }
 
 func TestAnalysisSettingsValidate(t *testing.T) {
-	ok := analysisSettings{Classify: true, ClassifyModel: "dsp", Transcribe: true, WhisperModel: "base", WhisperThreads: 2, WhisperSpeed: 1}
+	ok := analysisSettings{Classify: true, ClassifyModel: "dsp", ClassifyThreads: 1, Transcribe: true, WhisperModel: "base", WhisperThreads: 2, WhisperSpeed: 1}
 	if err := ok.validate(); err != nil {
 		t.Fatal(err)
 	}
+	for _, m := range []string{"mn05", "mn10", "mn20"} {
+		good := ok
+		good.ClassifyModel = m
+		if err := good.validate(); err != nil {
+			t.Errorf("%s rejected: %v", m, err)
+		}
+	}
 	bad := ok
-	bad.ClassifyModel = "mn10"
+	bad.ClassifyModel = "mn40"
 	if err := bad.validate(); err == nil {
 		t.Error("an unimplemented classifier was accepted")
+	}
+	bad = ok
+	bad.ClassifyThreads = 0
+	if err := bad.validate(); err == nil {
+		t.Error("zero classifier threads accepted")
 	}
 	bad = ok
 	bad.WhisperModel = "large"

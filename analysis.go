@@ -47,18 +47,20 @@ type AnalysisConfig struct {
 
 // analysisSettings are the host-wide switches, from flags and env vars.
 type analysisSettings struct {
-	Classify       bool
-	ClassifyModel  string
-	Transcribe     bool
-	WhisperHelper  string
-	WhisperModel   string
-	WhisperThreads int
-	WhisperSpeed   float64 // audio fed to the helper at this multiple of real time
-	ModelDir       string
+	Classify        bool
+	ClassifyModel   string
+	ClassifyThreads int
+	Transcribe      bool
+	WhisperHelper   string
+	WhisperModel    string
+	WhisperThreads  int
+	WhisperSpeed    float64 // audio fed to the helper at this multiple of real time
+	ModelDir        string
 }
 
-// classifyModels are the CLASSIFY_MODEL values this build implements.
-var classifyModels = []string{"dsp"}
+// classifyModels are the CLASSIFY_MODEL values this build implements: the
+// model-free DSP classifier and EfficientAT's mn05 / mn10 / mn20 (efficientat.go).
+var classifyModels = []string{"dsp", "mn05", "mn10", "mn20"}
 
 func (s *analysisSettings) validate() error {
 	if s.Classify {
@@ -71,6 +73,9 @@ func (s *analysisSettings) validate() error {
 		if !ok {
 			return fmt.Errorf("CLASSIFY_MODEL %q is not available in this build (available: %s)",
 				s.ClassifyModel, strings.Join(classifyModels, ", "))
+		}
+		if s.ClassifyThreads < 1 {
+			return fmt.Errorf("CLASSIFY_THREADS must be at least 1")
 		}
 	}
 	if s.Transcribe {
@@ -110,7 +115,8 @@ type classificationResult struct {
 	Backend    string    `json:"backend,omitempty"` // the classifier that actually ran, e.g. "dsp", "dsp+snr"
 	Confidence float64   `json:"confidence,omitempty"`
 	Windows    []string  `json:"windows,omitempty"` // per-window verdicts, in order
-	BandHz     []int     `json:"band_hz,omitempty"` // audio band measured, Hz
+	BandHz     []int     `json:"band_hz,omitempty"` // audio band measured, Hz (dsp)
+	Tags       []string  `json:"tags,omitempty"`    // strongest radio-relevant AudioSet labels (EfficientAT)
 	Reason     string    `json:"reason,omitempty"`  // why skipped or failed
 	At         time.Time `json:"at,omitempty"`
 }
@@ -228,6 +234,7 @@ type analyzer struct {
 	classifyQ   *jobQueue
 	transcribeQ *jobQueue
 	whisper     *whisperRunner // nil unless TRANSCRIBE is on
+	eat         *eatRunner     // nil unless CLASSIFY is on with an EfficientAT model
 
 	// channelLookup returns a channel's current opt-in and filter bandwidth,
 	// for segments re-queued after a restart (a segment does not record them).
@@ -245,6 +252,9 @@ func newAnalyzer(s analysisSettings, store *recordingStore, hub *sseHub) *analyz
 	if s.Transcribe {
 		a.whisper = newWhisperRunner(s)
 	}
+	if s.Classify && s.ClassifyModel != "dsp" {
+		a.eat = newEATRunner(s)
+	}
 	return a
 }
 
@@ -261,13 +271,16 @@ func (a *analyzer) start(ctx context.Context) {
 	}
 	if a.settings.Classify {
 		log.Printf("[analysis] classification enabled (model %s)", a.settings.ClassifyModel)
+		if a.eat != nil {
+			go a.eat.prepare(ctx)
+		}
 	}
 	if a.whisper != nil {
 		log.Printf("[analysis] transcription enabled (model %s, %d threads, %.1fx real time)",
 			a.settings.WhisperModel, a.settings.WhisperThreads, a.settings.WhisperSpeed)
 		go a.whisper.prepare(ctx)
 	}
-	go a.classifyWorker()
+	go a.classifyWorkerCtx(ctx)
 	go a.transcribeWorker(ctx)
 	go func() {
 		<-ctx.Done()
@@ -366,6 +379,10 @@ func (a *analyzer) requeuePending() {
 }
 
 func (a *analyzer) classifyWorker() {
+	a.classifyWorkerCtx(context.Background())
+}
+
+func (a *analyzer) classifyWorkerCtx(ctx context.Context) {
 	for {
 		j, ok := a.classifyQ.pop()
 		if !ok {
@@ -373,7 +390,7 @@ func (a *analyzer) classifyWorker() {
 		}
 		var label string
 		if j.classify {
-			res := a.runClassify(j)
+			res := a.runClassify(ctx, j)
 			label = res.Label
 			a.update(j.recID, func(an *segmentAnalysis) { an.Classification = res })
 		}
@@ -392,15 +409,27 @@ func (a *analyzer) classifyWorker() {
 	}
 }
 
-func (a *analyzer) runClassify(j analysisJob) *classificationResult {
+func (a *analyzer) runClassify(ctx context.Context, j analysisJob) *classificationResult {
 	now := time.Now().UTC()
 	audio, rate, err := readWAVMono(j.wavPath)
 	if err != nil {
 		return &classificationResult{Status: analysisFailed, Reason: err.Error(), At: now}
 	}
-	audio = resample(audio, rate, analysisRate)
-	lo, hi := analysisBand(j.mode, j.bwHz)
-	res := classifyDSP(audio, analysisRate, dspWindowSec, lo, hi)
+	var res *classificationResult
+	if a.eat != nil {
+		// The model resamples straight to its own 32 kHz.
+		if m, why := a.eat.get(ctx); m != nil {
+			res = m.classify(audio, rate)
+		} else {
+			// Never lose a segment's label to the model: fall back, and say so.
+			lo, hi := analysisBand(j.mode, j.bwHz)
+			res = classifyDSP(resample(audio, rate, analysisRate), analysisRate, dspWindowSec, lo, hi)
+			res.Reason = fmt.Sprintf("%s unavailable (%s); used dsp", a.settings.ClassifyModel, why)
+		}
+	} else {
+		lo, hi := analysisBand(j.mode, j.bwHz)
+		res = classifyDSP(resample(audio, rate, analysisRate), analysisRate, dspWindowSec, lo, hi)
+	}
 	res.At = time.Now().UTC()
 	if j.snrCount > 0 && j.snrAvg < noiseSNRdB && res.Label != "noise" {
 		res.Label = "noise"
@@ -476,6 +505,15 @@ func (a *analyzer) statusSnapshot() map[string]interface{} {
 		"enabled": s.Classify,
 		"model":   s.ClassifyModel,
 		"models":  classifyModels,
+		"state":   "disabled",
+	}
+	if s.Classify {
+		classify["state"] = "ready" // dsp needs nothing loaded
+	}
+	if a.eat != nil {
+		for k, v := range a.eat.status() {
+			classify[k] = v
+		}
 	}
 	transcribe := map[string]interface{}{
 		"enabled": s.Transcribe,

@@ -71,7 +71,8 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `CLEANUP_ALL_DAYS` | `30` | Delete ALL recordings older than N days; `0` = disabled |
 | `MAX_STORAGE_MB` | `20480` | Maximum total storage in MB across all channels; `0` = unlimited |
 | `CLASSIFY` | `false` | Classify closed segments as voice / music / noise — see [Analysis](#analysis-optional) |
-| `CLASSIFY_MODEL` | `dsp` | Classifier to use (this build: `dsp`) |
+| `CLASSIFY_MODEL` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` (EfficientAT) or `dsp` (no model) |
+| `CLASSIFY_THREADS` | `1` | CPU threads for the classifier |
 | `TRANSCRIBE` | `false` | Transcribe closed segments with Whisper |
 | `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
 | `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
@@ -169,14 +170,22 @@ The model is chosen once per host, so one model is loaded and results mean the s
 
 ### Classification
 
-Labels each segment **voice**, **music**, **voice + music** or **noise**, with the share of 5-second windows in each. The `dsp` classifier is a port of [NightDX](https://github.com/marcozennaro/nightdx)'s model-free classifier (MIT, © Marco Zennaro): spectral flatness, syllabic (2–8 Hz) loudness rhythm and spectral steadiness, with NightDX's thresholds.
+Labels each segment **voice**, **music**, **voice + music** or **noise**, with the share of windows in each. The rules for turning sounds into those four labels are [NightDX](https://github.com/marcozennaro/nightdx)'s (MIT, © Marco Zennaro).
 
-Two receiver-side rules apply on top:
+| `CLASSIFY_MODEL` | What it is | Download | CPU per 10 s of audio* |
+|---|---|---|---|
+| `mn05` | EfficientAT, width 0.5 (AudioSet mAP .443) | 5.9 MB | ~0.1 s |
+| `mn10` (default) | EfficientAT, width 1.0 (mAP .471) | 19.7 MB | ~0.15 s |
+| `mn20` | EfficientAT, width 2.0 (mAP .478) | 71.9 MB | ~0.6 s |
+| `dsp` | NightDX's model-free classifier | none | negligible |
 
-- **Band.** The measurement band is NightDX's 250–3500 Hz capped at the channel's audio passband. Without the cap an SSB filter's skirt falls inside the band and makes an empty SSB channel read as music.
-- **SNR.** A segment whose average passband SNR is below 3 dB is noise whatever the classifier hears in the hiss (an empty channel reads about 0 dB on the v4 scale). The label's backend then reads `dsp+snr`.
+\* one thread, x86-64 with AVX2, measured on a busy host.
 
-Data modes such as FT8 are steady tones and classify as music: not voice, which is what *Only transcribe voice* needs, but not a data-mode detector either.
+**EfficientAT** ([github.com/fschmid56/EfficientAT](https://github.com/fschmid56/EfficientAT), MIT, © Florian Schmid) are MobileNetV3 audio taggers trained on Google's AudioSet (527 sound classes). They replace the AST transformer NightDX uses (mAP .459) at a small fraction of its cost. airsplice runs them in pure Go, with AVX2/FMA (amd64) and NEON (arm64) kernels for the convolutions; the weights are the official release files, downloaded into `MODEL_DIR` on first start and checked against a pinned size and SHA-256 — no conversion step and no Python. Each 10-second window is tagged, and the strongest voice, music and noise tags among its top 40 decide that window, as in NightDX. The strongest radio-relevant tags ("Speech", "Radio", "Static", …) are kept with the result and shown on hover. If the model cannot be downloaded or loaded, segments are classified with `dsp` instead and the result says so.
+
+**`dsp`** is a port of NightDX's model-free classifier: spectral flatness, syllabic (2–8 Hz) loudness rhythm and spectral steadiness over 5-second windows, with NightDX's thresholds. Its measurement band is NightDX's 250–3500 Hz capped at the channel's audio passband; without the cap an SSB filter's skirt falls inside the band and makes an empty SSB channel read as music. It is much weaker than the models: data modes such as FT8 read as music, and it was checked on only a handful of SSB recordings.
+
+**SNR rule.** Whichever classifier runs, a segment whose average passband SNR is below 3 dB is noise whatever the classifier hears in the hiss (an empty channel reads about 0 dB on the v4 scale). The label's backend then ends in `+snr`.
 
 ### Transcription
 
@@ -194,13 +203,14 @@ Results are stored in each segment's `.json` sidecar under `analysis`, and pushe
 
 ```json
 "analysis": {
-  "classification": { "status": "done", "label": "voice", "voice_pct": 89, "music_pct": 0, "noise_pct": 11,
-                      "backend": "dsp", "band_hz": [300, 2430], "windows": ["voice", "voice", "noise"] },
+  "classification": { "status": "done", "label": "voice", "voice_pct": 80, "music_pct": 0, "noise_pct": 20,
+                      "backend": "mn10", "confidence": 0.84, "windows": ["voice", "voice", "voice", "voice", "noise"],
+                      "tags": ["Speech", "Radio", "Male speech, man speaking"] },
   "transcript": { "status": "done", "language": "en", "model": "base", "text": "…", "lines": ["…"], "partial": false }
 }
 ```
 
-`status` is `pending`, `done`, `skipped` or `failed` (with a `reason`). Segments under 2 s are skipped. Work still pending at shutdown is picked up again on the next start. `GET /api/analysis` reports what the host offers: whether each feature is enabled, the model, the transcriber's state (`starting`, `downloading`, `ready`, `unavailable`, `failed`) and the queue lengths.
+`status` is `pending`, `done`, `skipped` or `failed` (with a `reason`). Segments under 2 s are skipped. Work still pending at shutdown is picked up again on the next start. `GET /api/analysis` reports what the host offers: whether each feature is enabled, the model, each one's state (`starting`, `downloading`, `ready`, `unavailable`, `failed`) and the queue lengths.
 
 ---
 
@@ -286,7 +296,8 @@ All flags:
 | `-cleanup-all-days` | `30` | Delete recordings older than N days; `0` = disabled |
 | `-max-storage-mb` | `20480` | Maximum total storage in MB; `0` = unlimited |
 | `-classify` | `false` | Classify closed segments |
-| `-classify-model` | `dsp` | Classifier |
+| `-classify-model` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` or `dsp` |
+| `-classify-threads` | `1` | CPU threads for the classifier |
 | `-transcribe` | `false` | Transcribe closed segments |
 | `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
 | `-whisper-model` | `base` | `tiny`, `base` or `small` |
