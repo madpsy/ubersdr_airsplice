@@ -39,6 +39,12 @@ func (d *PCMv4StreamDecoder) DecodePacket(pkt []byte) (PCMv4Header, []int16, err
 	if err != nil {
 		return h, nil, err
 	}
+	// The count comes off the wire and sizes the allocation below, so a
+	// corrupt one must be refused before it is believed: an unbounded uvarint
+	// is a request for exabytes, and Go answers that by killing the process.
+	if h.SampleCount > MaxSampleCount {
+		return h, nil, fmt.Errorf("pcm v4: implausible sample count %d", h.SampleCount)
+	}
 
 	// The packet declares its own profile; nothing here infers it from the
 	// mode or the channel count. A profile this build does not implement is an
@@ -92,6 +98,11 @@ func (d *PCMv4StreamDecoder) DecodePacket(pkt []byte) (PCMv4Header, []int16, err
 	lossyRestore(samples, shift)
 	return h, samples, nil
 }
+
+// MaxSampleCount bounds the samples one packet may claim. The server sends a
+// few thousand at most -- a 384 kHz IQ packet is tens of milliseconds -- so this
+// is headroom by two orders of magnitude, not a limit a real stream meets.
+const MaxSampleCount = 1 << 20
 
 // lossyMaxShift is the largest shift the wire format allows. Bounded because it
 // comes off the wire like every other length here and is applied to an int16.
