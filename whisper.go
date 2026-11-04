@@ -101,6 +101,14 @@ const (
 	frameStop  = 4
 )
 
+// whisperLeadFrames of audio go to the helper at once, ahead of the pace, so
+// its queue holds about that much while it keeps up. The helper transcribes an
+// interim of the utterance in progress whenever its queue is nearly empty
+// (under 0.5 s) -- live captions, which airsplice discards and which can take
+// up to half its time. With a lead it is never idle enough to bother, and the
+// lead stays far inside the 10 s at which it starts dropping audio.
+const whisperLeadFrames = 30 // 3 s
+
 const (
 	whisperFrameSamples = analysisRate / 10    // 100 ms per AUDIO frame
 	whisperTailSilence  = analysisRate * 3 / 2 // 1.5 s to close the last utterance
@@ -349,8 +357,16 @@ func fileSHA256(path string) (string, error) {
 
 // startHelper launches the helper and waits for {"type":"ready"}.
 func (w *whisperRunner) startHelper() error {
-	cmd := exec.Command(w.helperPath, "--model", w.modelPath, "--vad-model", w.vadPath,
-		"--threads", fmt.Sprint(w.settings.WhisperThreads))
+	args := []string{"--model", w.modelPath, "--vad-model", w.vadPath,
+		"--threads", fmt.Sprint(w.settings.WhisperThreads)}
+	if w.settings.WhisperSizedFinals {
+		// Each utterance's final encoded at its own length, not Whisper's full
+		// 30 s window: several times cheaper (the helper's own measurement;
+		// what the browser build uses). A final that comes out garbled falls
+		// back on the utterance's last interim, in the helper.
+		args = append(args, "--sized-finals")
+	}
+	cmd := exec.Command(w.helperPath, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -577,8 +593,10 @@ func (w *whisperRunner) transcribeOnce(ctx context.Context, j analysisJob, speed
 			return feedBehind
 		}
 		sent++
-		if wait := time.Until(t0.Add(time.Duration(sent) * frameDur)); wait > 0 {
-			time.Sleep(wait)
+		if sent > whisperLeadFrames { // the first few go at once (whisperLeadFrames)
+			if wait := time.Until(t0.Add(time.Duration(sent-whisperLeadFrames) * frameDur)); wait > 0 {
+				time.Sleep(wait)
+			}
 		}
 		return feedOK
 	}

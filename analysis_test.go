@@ -571,7 +571,8 @@ func fakeHelper(mode string) {
 					t0 = time.Now()
 				}
 				samples += len(body) / 2
-				if el := time.Since(t0).Seconds(); !warned && samples > 16000 && float64(samples)/16000 > 3*el+0.3 {
+				// (The first whisperLeadFrames arrive at once, by design.)
+				if el := time.Since(t0).Seconds(); !warned && samples > 16000 && float64(samples)/16000 > 3*el+0.3+float64(whisperLeadFrames)/10 {
 					warned = true
 					say(map[string]interface{}{"type": "error", "session": session, "code": "falling-behind", "message": "behind", "fatal": false})
 				}
@@ -863,7 +864,7 @@ func TestChannelRecordingAnalysis(t *testing.T) {
 // on falling behind retries the segment slower rather than keep a partial.
 func TestWhisperAutoPaceAdapts(t *testing.T) {
 	s := newTestStore(t)
-	r := addTestSegment(t, s, babble(12000, 6), 12000, 20)
+	r := addTestSegment(t, s, babble(12000, 15), 12000, 20)
 	set := fakeWhisperSettings(t, "rate") // falls behind above 3x real time
 	set.WhisperSpeed = 0                  // auto
 	w := readyRunner(t, set)

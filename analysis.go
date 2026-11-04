@@ -58,7 +58,10 @@ type analysisSettings struct {
 	WhisperModel    string
 	WhisperThreads  int
 	WhisperSpeed    float64 // feed pace, x real time; 0 = auto (adaptive)
-	ModelDir        string
+	// WhisperSizedFinals passes --sized-finals: each utterance encoded at its
+	// own length rather than Whisper's 30 s window, several times cheaper.
+	WhisperSizedFinals bool
+	ModelDir           string
 }
 
 // classifyModels are the CLASSIFY_MODEL values this build implements: the

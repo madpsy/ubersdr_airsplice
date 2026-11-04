@@ -77,6 +77,7 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
 | `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
 | `WHISPER_THREADS` | `2` | CPU threads for Whisper |
+| `WHISPER_SIZED_FINALS` | `true` | Encode each utterance at its own length rather than Whisper's 30 s window — several times cheaper |
 | `WHISPER_SPEED` | `auto` | Pace audio is fed to Whisper at: `auto` adapts to the host (2× to 8× real time), or a fixed multiple (0.5–8) |
 | `MODEL_DIR` | `<OUTPUT_DIR>/models` | Where downloaded models are kept |
 
@@ -318,6 +319,7 @@ All flags:
 | `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
 | `-whisper-model` | `base` | `tiny`, `base` or `small` |
 | `-whisper-threads` | `2` | CPU threads for Whisper |
+| `-whisper-sized-finals` | `true` | Encode utterances at their own length |
 | `-whisper-speed` | `0` (auto) | Pace to feed Whisper, × real time; 0 = auto |
 | `-model-dir` | `<output>/models` | Downloaded model cache |
 

@@ -546,6 +546,8 @@ func main() {
 			"CPU threads for Whisper (env: WHISPER_THREADS)")
 		whisperSpeed = flag.Float64("whisper-speed", envSpeedOr("WHISPER_SPEED"),
 			"Pace segments are fed to Whisper at, x real time: 0.5-8, or 0 = auto (adapts to the host; default) (env: WHISPER_SPEED, \"auto\" or a number)")
+		whisperSizedFinals = flag.Bool("whisper-sized-finals", envBoolOr("WHISPER_SIZED_FINALS", true),
+			"Encode each utterance at its own length, not Whisper's 30 s window: several times cheaper (env: WHISPER_SIZED_FINALS)")
 		modelDir = flag.String("model-dir", envOr("MODEL_DIR", ""),
 			"Where downloaded models are kept; default <output>/models (env: MODEL_DIR)")
 	)
@@ -561,15 +563,16 @@ func main() {
 	*segmentSecs = normalizeSegmentSecs(*segmentSecs)
 
 	anSettings := analysisSettings{
-		Classify:        *classify,
-		ClassifyModel:   *classifyModel,
-		ClassifyThreads: *classifyThreads,
-		Transcribe:      *transcribe,
-		WhisperHelper:   *whisperHelper,
-		WhisperModel:    *whisperModel,
-		WhisperThreads:  *whisperThreads,
-		WhisperSpeed:    *whisperSpeed,
-		ModelDir:        *modelDir,
+		Classify:           *classify,
+		ClassifyModel:      *classifyModel,
+		ClassifyThreads:    *classifyThreads,
+		Transcribe:         *transcribe,
+		WhisperHelper:      *whisperHelper,
+		WhisperModel:       *whisperModel,
+		WhisperThreads:     *whisperThreads,
+		WhisperSpeed:       *whisperSpeed,
+		WhisperSizedFinals: *whisperSizedFinals,
+		ModelDir:           *modelDir,
 	}
 	if anSettings.ModelDir == "" {
 		anSettings.ModelDir = filepath.Join(*outputDir, "models")
