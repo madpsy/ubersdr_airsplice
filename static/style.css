@@ -511,7 +511,9 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 /* Make seg-row a grid so the player can span full width */
 .seg-row {
   display: grid;
-  grid-template-columns: minmax(28px, max-content) 1fr 1fr 1fr auto auto;
+  /* Fixed columns so every row of a recording lines up, whatever its tags:
+     index, time, duration, SNR, then analysis (the rest), then actions. */
+  grid-template-columns: 64px 175px 100px 110px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 8px 16px 8px 32px;
@@ -1126,7 +1128,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   color: #93b4f5;
 }
 
-.seg-analysis { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.seg-analysis { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; justify-content: flex-start; }
 .an-label {
   font-size: 0.72rem;
   font-weight: 600;
@@ -1257,7 +1259,7 @@ button.an-label:hover { filter: brightness(1.25); }
 .sa-tx-time { color: var(--muted); font-size: 0.75rem; padding-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 @media (max-width: 700px) {
-  .seg-row { grid-template-columns: 28px 1fr auto; }
+  .seg-row { grid-template-columns: 64px 1fr auto; }
   .seg-row .seg-analysis { grid-column: 1 / -1; flex-wrap: wrap; }
   .an-strip { width: 56px; }
 }
@@ -1284,7 +1286,25 @@ button.an-label:hover { filter: brightness(1.25); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sess-an-chip { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+/* The header keeps to one line: its tags are capped and fade out at the edge. */
+.sess-an-chip {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  align-items: center;
+  max-width: 34%;
+  overflow: hidden;
+}
+.sess-an-chip.sess-an-overflow {
+  -webkit-mask-image: linear-gradient(to right, #000 85%, transparent);
+  mask-image: linear-gradient(to right, #000 85%, transparent);
+}
+.sess-an-chip .an-tag, .seg-tags .an-tag {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
 .seg-tags { display: inline-flex; gap: 3px; flex-wrap: wrap; }
 .seg-tags .an-tag, .sess-an-chip .an-tag, .ch-last-heard .an-tag { font-size: 0.7rem; padding: 0 7px; }
 

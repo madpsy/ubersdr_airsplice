@@ -570,7 +570,6 @@ function segAnalysisHTML(seg) {
       const share = Math.round(labelShare(c) || 0);
       out += `<button class="an-label an-${AN_KEY(c.label)}" onclick="toggleSegDetail(this)" title="Show what was heard">${escHtml(AN_LABELS[c.label] || c.label)} ${share}%</button>`;
       out += windowStripHTML(c.windows);
-      if (c.tags && c.tags.length) out += `<span class="seg-tags">${tagChipsHTML(c.tags, 3)}</span>`;
     } else if (c.status === 'pending') {
       out += `<span class="an-label an-pending" title="Classification queued">Classifying…</span>`;
     } else {
@@ -588,6 +587,10 @@ function segAnalysisHTML(seg) {
     } else {
       out += `<button class="an-label an-${t.status}" onclick="toggleSegDetail(this)" title="${escHtml(t.reason || '')}">${t.status === 'failed' ? '⚠ No transcript' : 'No transcript'}</button>`;
     }
+  }
+  // Tags last, so if the row is too narrow it is they that wrap, not the buttons.
+  if (c && c.status === 'done' && c.tags && c.tags.length) {
+    out += `<span class="seg-tags">${tagChipsHTML(c.tags, 3)}</span>`;
   }
   return out;
 }
@@ -677,7 +680,10 @@ function setChannelLastHeard(card, lh) {
 function toggleSegDetail(btn) {
   const row = btn.closest('.seg-row');
   const d = row && row.querySelector('.seg-an-detail');
-  if (d && d.innerHTML.trim()) d.classList.toggle('hidden');
+  if (!d || !d.innerHTML.trim()) return;
+  const open = d.classList.toggle('hidden') === false;
+  const k = 'segdet:' + row.dataset.id;
+  if (open) uiOpen.add(k); else uiOpen.delete(k);
 }
 
 // The transcript block under a segment row (empty when there is none).
@@ -694,7 +700,10 @@ function segTranscriptHTML(seg) {
 function toggleTranscript(btn) {
   const row = btn.closest('.seg-row');
   const tx = row && row.querySelector('.seg-transcript');
-  if (tx && tx.innerHTML.trim()) tx.classList.toggle('hidden');
+  if (!tx || !tx.innerHTML.trim()) return;
+  const open = tx.classList.toggle('hidden') === false;
+  const k = 'segtx:' + row.dataset.id;
+  if (open) uiOpen.add(k); else uiOpen.delete(k);
 }
 
 // ── Recording summary: what the whole recording (so far) contains ──────────
@@ -768,6 +777,8 @@ function renderSessionAnalysis(card) {
     chip.innerHTML = sum.label
       ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])} ${Math.round(Math.max(sum.vp, sum.mp, sum.zp))}%</span> ${tagChipsHTML(sum.tags.map(([t]) => t), 3)}`
       : '';
+    // Fade the edge only when the tags do not fit (measured once laid out).
+    requestAnimationFrame(() => chip.classList.toggle('sess-an-overflow', chip.scrollWidth > chip.clientWidth + 1));
   }
   const bar = sum.classifiedSec ? `
     <div class="sa-bar" role="img" aria-label="voice ${Math.round(sum.vp)}%, music ${Math.round(sum.mp)}%, noise ${Math.round(sum.zp)}%">
@@ -786,7 +797,7 @@ function renderSessionAnalysis(card) {
     ? `<div class="sa-tags"><span class="sa-sub">Heard${soFar}:</span> ${sum.tags.map(([t, n]) =>
         `<span class="an-tag" title="Among the strongest sounds in ${n} segment${n !== 1 ? 's' : ''}">${escHtml(t)} <b>${n}</b></span>`).join(' ')}</div>`
     : '';
-  const wasOpen = box.querySelector('.sa-transcript:not(.hidden)') != null;
+  const wasOpen = uiOpen.has('sesstx:' + cardKeyOf(card));
   const txBtn = sum.lines
     ? `<button class="an-tx-btn sa-tx-btn" onclick="toggleSessionTranscript(this)">📝 Transcript of the recording${soFar} (${sum.lines} line${sum.lines !== 1 ? 's' : ''})</button>`
     : (sum.transcribed ? '<span class="an-muted">Transcribed: no speech recognised</span>' : '');
@@ -806,8 +817,12 @@ function renderSessionAnalysis(card) {
 }
 
 function toggleSessionTranscript(btn) {
+  const card = btn.closest('.session-card');
   const tx = btn.closest('.sess-analysis').querySelector('.sa-transcript');
-  if (tx && tx.innerHTML.trim()) tx.classList.toggle('hidden');
+  if (!tx || !tx.innerHTML.trim()) return;
+  const open = tx.classList.toggle('hidden') === false;
+  const k = 'sesstx:' + cardKeyOf(card);
+  if (open) uiOpen.add(k); else uiOpen.delete(k);
 }
 
 function loadChannels() {
@@ -2122,6 +2137,7 @@ function renderSessionCard(ss, container) {
   });
 
   container.appendChild(card);
+  restoreOpenState(card);
 
   // Load SNR timeline after card is in DOM (canvas needs layout width).
   // Use channel UUID (cardKey) so telemetry spans all sessions for this channel.
@@ -3200,12 +3216,39 @@ function sessStepSegment(btn, delta) {
   sessLoadSegment(card, segments[idx], 0);
 }
 
+// What the user has opened — expanded recordings, transcripts, details — kept
+// across the automatic refreshes that rebuild cards, so nothing snaps shut.
+// Keys: "sess:<card key>", "sesstx:<card key>", "segdet:<id>", "segtx:<id>".
+const uiOpen = new Set();
+
+function cardKeyOf(card) { return card.dataset.channelId || card.dataset.sessionId || ''; }
+
 function toggleSession(header) {
-  const segs = header.closest('.session-card').querySelector('.session-segments');
-  const arrow = header.querySelector('.sess-toggle');
+  const card = header.closest('.session-card');
+  const segs = card.querySelector('.session-segments');
   const open = !segs.classList.contains('hidden');
-  segs.classList.toggle('hidden', open);
-  arrow.textContent = open ? '▶' : '▼';
+  setSessionExpanded(card, !open);
+}
+
+function setSessionExpanded(card, open) {
+  const segs = card.querySelector('.session-segments');
+  const arrow = card.querySelector('.sess-toggle');
+  segs.classList.toggle('hidden', !open);
+  if (arrow) arrow.textContent = open ? '▼' : '▶';
+  const k = 'sess:' + cardKeyOf(card);
+  if (open) uiOpen.add(k); else uiOpen.delete(k);
+}
+
+// Re-open what was open before a card was rebuilt.
+function restoreOpenState(card) {
+  if (uiOpen.has('sess:' + cardKeyOf(card))) setSessionExpanded(card, true);
+  card.querySelectorAll('.seg-row[data-id]').forEach(row => {
+    const id = row.dataset.id;
+    const det = row.querySelector('.seg-an-detail');
+    if (det && det.innerHTML.trim() && uiOpen.has('segdet:' + id)) det.classList.remove('hidden');
+    const tx = row.querySelector('.seg-transcript');
+    if (tx && tx.innerHTML.trim() && uiOpen.has('segtx:' + id)) tx.classList.remove('hidden');
+  });
 }
 
 function renderPagination() {
