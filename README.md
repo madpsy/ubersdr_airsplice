@@ -189,7 +189,13 @@ Labels each segment **voice**, **music**, **voice + music** or **noise**, with t
 
 ### Transcription
 
-Runs [UberSDR's `whisper-helper`](https://github.com/ka9q/ubersdr) — whisper.cpp with Silero voice-activity detection, the same recogniser the UberSDR desktop client uses — as a child process at low CPU priority. airsplice does not ship it: build it from `clients/electron/whisper` in the UberSDR tree (it is statically linked, one file per platform) and set `WHISPER_HELPER` to its path, or mount it into the container. If it is missing, transcription reports itself unavailable in the UI rather than failing silently.
+Runs UberSDR's `whisper-helper` ([`clients/electron/whisper`](https://github.com/madpsy/ka9q_ubersdr/tree/main/clients/electron/whisper)) — whisper.cpp with Silero voice-activity detection, the same recogniser the UberSDR desktop client uses — as a child process at low CPU priority. Three ways to provide it:
+
+- **Build it into the image:** `docker build --build-arg WITH_WHISPER=1 .` compiles it from UberSDR and whisper.cpp at pinned commits (static; on x86-64 a baseline build that hands over to an AVX2 one when the CPU has it). `BUILD_JOBS` sets the compile parallelism.
+- **Mount it:** build it with UberSDR's `clients/electron/whisper/build.sh` (one static file per platform) and mount it into the container (see `docker-compose.yml`), setting `WHISPER_HELPER` to its path.
+- **Outside Docker:** put it on `PATH` or point `WHISPER_HELPER` at it.
+
+The default image does not include it. If it is missing, transcription reports itself unavailable in the UI rather than failing silently.
 
 The Whisper model and the VAD model are downloaded on first start into `MODEL_DIR`, from Hugging Face URLs pinned to a commit and checked against a pinned size and SHA-256 (the same pins as UberSDR's `models.json`). `base` is about 60 MB, `tiny` 32 MB, `small` 190 MB.
 
@@ -261,6 +267,7 @@ After running `install.sh`, the following scripts are available in `~/ubersdr/ai
 ### Docker image
 
 ```bash
+docker build --build-arg WITH_WHISPER=1 .   # include whisper-helper for TRANSCRIBE
 ./docker.sh build          # build madpsy/ubersdr_airsplice:latest
 ./docker.sh push           # build and push to Docker Hub
 ./docker.sh run            # run locally (uses env vars)
