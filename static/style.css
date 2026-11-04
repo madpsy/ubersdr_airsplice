@@ -137,8 +137,8 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   padding: 14px 16px;
 }
 
-.ch-label-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: nowrap; }
-.channel-card .ch-label { font-weight: 600; font-size: 0.95rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-label-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+.channel-card .ch-label { font-weight: 600; font-size: 0.95rem; flex: 1; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .channel-card .ch-freq-row {
   display: flex;
   align-items: baseline;
@@ -511,7 +511,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 /* Make seg-row a grid so the player can span full width */
 .seg-row {
   display: grid;
-  grid-template-columns: 28px 1fr 1fr 1fr auto;
+  grid-template-columns: 28px 1fr 1fr 1fr auto auto;
   align-items: center;
   gap: 12px;
   padding: 8px 16px 8px 32px;
@@ -1071,3 +1071,107 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   cursor: pointer;
 }
 .sched-add-rule-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Optional analysis: classification / transcription ── */
+.an-fields {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.15);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.an-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.an-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text);
+  cursor: pointer;
+}
+.an-check input { accent-color: var(--accent); }
+.an-check.an-disabled { color: var(--muted); cursor: default; }
+.an-note { font-size: 0.72rem; color: var(--muted); margin: -2px 0 4px 22px; }
+.an-note.error { color: var(--danger); }
+.an-transcribe-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 22px;
+}
+.an-transcribe-opts.an-dim { opacity: 0.5; }
+.an-transcribe-opts .an-note { margin-left: 22px; }
+
+.an-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid #3b4a6b;
+  background: #16203a;
+  color: #93b4f5;
+}
+
+.seg-analysis { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.an-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: default;
+}
+.an-voice       { background: #0f2a1a; color: var(--accent2); border-color: var(--accent2); }
+.an-music       { background: #24163a; color: #c4a1f7; border-color: #8b6bd1; }
+.an-voice-music { background: #102434; color: #7dd3fc; border-color: #38bdf8; }
+.an-noise       { background: #1e2030; color: var(--muted); }
+.an-pending     { color: #f5c542; border-color: #5a4a14; }
+.an-failed      { color: var(--danger); border-color: #5a2424; }
+.an-skipped     { color: var(--muted); }
+.an-tx-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.75rem;
+  padding: 1px 7px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.an-tx-btn:hover { border-color: var(--accent); }
+
+.seg-transcript {
+  grid-column: 1 / -1;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  background: rgba(0,0,0,0.2);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+.seg-transcript p { margin-bottom: 4px; }
+.an-tx-meta { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+
+/* The add-channel form styles every label as a column; analysis rows are not. */
+#add-analysis-mount { flex-basis: 100%; }
+.add-channel-fields .an-check {
+  flex-direction: row;
+  align-items: center;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.add-channel-fields .an-check.an-disabled { color: var(--muted); }
+.add-channel-fields .an-check input { min-width: 0; padding: 0; }

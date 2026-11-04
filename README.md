@@ -70,6 +70,15 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `SEGMENT_SECS` | `300` | Rotate to a new WAV file every N seconds; `0` = one continuous file per session |
 | `CLEANUP_ALL_DAYS` | `30` | Delete ALL recordings older than N days; `0` = disabled |
 | `MAX_STORAGE_MB` | `20480` | Maximum total storage in MB across all channels; `0` = unlimited |
+| `CLASSIFY` | `false` | Classify closed segments as voice / music / noise — see [Analysis](#analysis-optional) |
+| `CLASSIFY_MODEL` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` (EfficientAT) or `dsp` (no model) |
+| `CLASSIFY_THREADS` | `1` | CPU threads for the classifier |
+| `TRANSCRIBE` | `false` | Transcribe closed segments with Whisper |
+| `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
+| `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
+| `WHISPER_THREADS` | `2` | CPU threads for Whisper |
+| `WHISPER_SPEED` | `1.0` | Feed audio to Whisper at this multiple of real time (0.5–8) |
+| `MODEL_DIR` | `<OUTPUT_DIR>/models` | Where downloaded models are kept |
 
 Channels are **not** configured via environment variables — they are added and removed through the web UI and persisted to `channels.json` in the output directory.
 
@@ -87,6 +96,7 @@ Open `http://<host>:6095` in a browser to access:
 - **Download** — stream any session or individual segment as a WAV file
 - **Delete** — remove individual segments or entire sessions (requires UI password)
 - **Retention & quota settings** — configure per-channel or global retention hours and storage quotas from the UI
+- **Analysis** (optional) — per-channel classification and transcription settings; each segment shows its voice / music / noise label and, when transcribed, a 📝 button that opens the transcript
 
 ---
 
@@ -149,6 +159,67 @@ Smart Record and Schedule can be combined: the schedule gate controls *when* the
 
 ---
 
+## Analysis (optional)
+
+Two optional features work on each segment after it closes, in the background, without holding up recording. **Both are off by default.** Each needs two switches:
+
+1. **On the host** — `CLASSIFY=true` and/or `TRANSCRIBE=true`. While a feature is off nothing is loaded, downloaded or started for it.
+2. **On the channel** — in the channel's ⚙ Settings, under *Analysis*. A new channel opts in to nothing, so enabling a feature on the host never starts work on a channel by surprise.
+
+The model is chosen once per host, so one model is loaded and results mean the same thing on every channel. In the UI, an option that is off on the host is shown disabled with the setting that turns it on; the channel's saved choice is kept and applies once the feature is enabled.
+
+### Classification
+
+Labels each segment **voice**, **music**, **voice + music** or **noise**, with the share of windows in each. The rules for turning sounds into those four labels are [NightDX](https://github.com/marcozennaro/nightdx)'s (MIT, © Marco Zennaro).
+
+| `CLASSIFY_MODEL` | What it is | Download | CPU per 10 s of audio* |
+|---|---|---|---|
+| `mn05` | EfficientAT, width 0.5 (AudioSet mAP .443) | 5.9 MB | ~0.1 s |
+| `mn10` (default) | EfficientAT, width 1.0 (mAP .471) | 19.7 MB | ~0.15 s |
+| `mn20` | EfficientAT, width 2.0 (mAP .478) | 71.9 MB | ~0.6 s |
+| `dsp` | NightDX's model-free classifier | none | negligible |
+
+\* one thread, x86-64 with AVX2, measured on a busy host.
+
+**EfficientAT** ([github.com/fschmid56/EfficientAT](https://github.com/fschmid56/EfficientAT), MIT, © Florian Schmid) are MobileNetV3 audio taggers trained on Google's AudioSet (527 sound classes). They replace the AST transformer NightDX uses (mAP .459) at a small fraction of its cost. airsplice runs them in pure Go, with AVX2/FMA (amd64) and NEON (arm64) kernels for the convolutions; the weights are the official release files, downloaded into `MODEL_DIR` on first start and checked against a pinned size and SHA-256 — no conversion step and no Python. Each 10-second window is tagged, and the strongest voice, music and noise tags among its top 40 decide that window, as in NightDX. The strongest radio-relevant tags ("Speech", "Radio", "Static", …) are kept with the result and shown on hover. If the model cannot be downloaded or loaded, segments are classified with `dsp` instead and the result says so.
+
+**`dsp`** is a port of NightDX's model-free classifier: spectral flatness, syllabic (2–8 Hz) loudness rhythm and spectral steadiness over 5-second windows, with NightDX's thresholds. Its measurement band is NightDX's 250–3500 Hz capped at the channel's audio passband; without the cap an SSB filter's skirt falls inside the band and makes an empty SSB channel read as music. It is much weaker than the models: data modes such as FT8 read as music, and it was checked on only a handful of SSB recordings.
+
+**SNR rule.** Whichever classifier runs, a segment whose average passband SNR is below 3 dB is noise whatever the classifier hears in the hiss (an empty channel reads about 0 dB on the v4 scale). The label's backend then ends in `+snr`.
+
+### Transcription
+
+Runs UberSDR's `whisper-helper` ([`clients/electron/whisper`](https://github.com/madpsy/ka9q_ubersdr/tree/main/clients/electron/whisper)) — whisper.cpp with Silero voice-activity detection, the same recogniser the UberSDR desktop client uses — as a child process at low CPU priority. Three ways to provide it:
+
+- **Build it into the image:** `docker build --build-arg WITH_WHISPER=1 .` compiles it from UberSDR and whisper.cpp at pinned commits (static; on x86-64 a baseline build that hands over to an AVX2 one when the CPU has it). `BUILD_JOBS` sets the compile parallelism.
+- **Mount it:** build it with UberSDR's `clients/electron/whisper/build.sh` (one static file per platform) and mount it into the container (see `docker-compose.yml`), setting `WHISPER_HELPER` to its path.
+- **Outside Docker:** put it on `PATH` or point `WHISPER_HELPER` at it.
+
+The default image does not include it. If it is missing, transcription reports itself unavailable in the UI rather than failing silently.
+
+The Whisper model and the VAD model are downloaded on first start into `MODEL_DIR`, from Hugging Face URLs pinned to a commit and checked against a pinned size and SHA-256 (the same pins as UberSDR's `models.json`). `base` is about 60 MB, `tiny` 32 MB, `small` 190 MB.
+
+Per channel you choose the **language** (or automatic detection) and whether to **only transcribe segments classified as voice** (which needs classification on for the channel too).
+
+Whisper's helper is built for live audio: it skips audio once it is more than 10 s behind. Segments are therefore fed at `WHISPER_SPEED` × real time, one at a time; a transcript the helper fell behind on is marked *partial*. At the default 1.0 one helper keeps up with one channel's worth of continuous audio — transcription suits VOX and scheduled channels best. When the queue (32 segments) is full the oldest waiting segment is skipped.
+
+### Results
+
+Results are stored in each segment's `.json` sidecar under `analysis`, and pushed to the UI as they arrive:
+
+```json
+"analysis": {
+  "classification": { "status": "done", "label": "voice", "voice_pct": 80, "music_pct": 0, "noise_pct": 20,
+                      "backend": "mn10", "confidence": 0.84, "windows": ["voice", "voice", "voice", "voice", "noise"],
+                      "tags": ["Speech", "Radio", "Male speech, man speaking"] },
+  "transcript": { "status": "done", "language": "en", "model": "base", "text": "…", "lines": ["…"], "partial": false }
+}
+```
+
+`status` is `pending`, `done`, `skipped` or `failed` (with a `reason`). Segments under 2 s are skipped. Work still pending at shutdown is picked up again on the next start. `GET /api/analysis` reports what the host offers: whether each feature is enabled, the model, each one's state (`starting`, `downloading`, `ready`, `unavailable`, `failed`) and the queue lengths.
+
+---
+
 ## Output files
 
 Each completed recording segment produces three files in the output directory:
@@ -156,7 +227,7 @@ Each completed recording segment produces three files in the output directory:
 | File | Description |
 |------|-------------|
 | `<uuid>.wav` | PCM audio (mono S16LE, sample rate from UberSDR) |
-| `<uuid>.json` | Segment metadata (label, frequency, mode, timestamps, duration, SNR stats) |
+| `<uuid>.json` | Segment metadata (label, frequency, mode, timestamps, duration, SNR stats, and [analysis](#analysis-optional) results when enabled) |
 | `<uuid>.jsonl` | Telemetry log: one JSON object per line, appended every ~10 s while recording — `{"t":"<ISO>","snr":{...},"level_dbfs":<f32>}` |
 
 A session-level sidecar (`session_<uuid>.json`) is also maintained, grouping all segments that belong to the same continuous recording session.
@@ -196,6 +267,7 @@ After running `install.sh`, the following scripts are available in `~/ubersdr/ai
 ### Docker image
 
 ```bash
+docker build --build-arg WITH_WHISPER=1 .   # include whisper-helper for TRANSCRIBE
 ./docker.sh build          # build madpsy/ubersdr_airsplice:latest
 ./docker.sh push           # build and push to Docker Hub
 ./docker.sh run            # run locally (uses env vars)
@@ -230,6 +302,15 @@ All flags:
 | `-segment-secs` | `300` | WAV segment length in seconds; `0` = continuous |
 | `-cleanup-all-days` | `30` | Delete recordings older than N days; `0` = disabled |
 | `-max-storage-mb` | `20480` | Maximum total storage in MB; `0` = unlimited |
+| `-classify` | `false` | Classify closed segments |
+| `-classify-model` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` or `dsp` |
+| `-classify-threads` | `1` | CPU threads for the classifier |
+| `-transcribe` | `false` | Transcribe closed segments |
+| `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
+| `-whisper-model` | `base` | `tiny`, `base` or `small` |
+| `-whisper-threads` | `2` | CPU threads for Whisper |
+| `-whisper-speed` | `1.0` | Multiple of real time to feed Whisper |
+| `-model-dir` | `<output>/models` | Downloaded model cache |
 
 ---
 

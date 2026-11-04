@@ -10,6 +10,10 @@
 #   CLEANUP_ALL_DAYS  Delete ALL recordings older than N days; 0 = disabled (default: 30)
 #   UI_PASSWORD       Password for write actions in the web UI (optional)
 #
+# The optional analysis settings (CLASSIFY, CLASSIFY_MODEL, CLASSIFY_THREADS,
+# TRANSCRIBE, WHISPER_HELPER, WHISPER_MODEL, WHISPER_THREADS, WHISPER_SPEED,
+# MODEL_DIR) are read by ubersdr_airsplice itself; see the README.
+#
 # Channels are persisted in $OUTPUT_DIR/channels.json and managed via the web UI.
 # No UBERSDR_CHANNELS env var is needed.
 

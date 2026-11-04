@@ -164,6 +164,7 @@ type channelConfig struct {
 	Schedule    ScheduleConfig    `json:"schedule,omitempty"`     // time-based scheduled recording
 	BandwidthHz int               `json:"bandwidth_hz,omitempty"` // filter bandwidth in Hz; 0 = server default
 	MaxMB       int64             `json:"max_mb,omitempty"`       // per-channel storage quota in MB; 0 = use overall limit
+	Analysis    AnalysisConfig    `json:"analysis,omitempty"`     // optional classification / transcription opt-in
 }
 
 // ---------------------------------------------------------------------------
@@ -182,9 +183,10 @@ type channelManager struct {
 	ctx         context.Context
 	configPath  string // path to channels.json
 	quota       *quotaConfig
+	analyzer    *analyzer
 }
 
-func newChannelManager(ctx context.Context, ubersdrURL, password string, segmentSecs int, store *recordingStore, hub *sseHub, configPath string, qc *quotaConfig) *channelManager {
+func newChannelManager(ctx context.Context, ubersdrURL, password string, segmentSecs int, store *recordingStore, hub *sseHub, configPath string, qc *quotaConfig, az *analyzer) *channelManager {
 	return &channelManager{
 		ubersdrURL:  ubersdrURL,
 		password:    password,
@@ -194,13 +196,14 @@ func newChannelManager(ctx context.Context, ubersdrURL, password string, segment
 		ctx:         ctx,
 		configPath:  configPath,
 		quota:       qc,
+		analyzer:    az,
 	}
 }
 
 // add starts a new channel and registers it. Returns error if label already exists.
 // name is optional; if empty the label defaults to "{freq}_{mode}".
 // channelID is the stable UUID for this channel; if empty a new one is generated.
-func (m *channelManager) add(freqHz int, mode, name, channelID string, sr SmartRecordConfig, sched ScheduleConfig, bandwidthHz int) (*recChannel, error) {
+func (m *channelManager) add(freqHz int, mode, name, channelID string, sr SmartRecordConfig, sched ScheduleConfig, bandwidthHz int, an AnalysisConfig) (*recChannel, error) {
 	label := name
 	if label == "" {
 		label = fmt.Sprintf("%d_%s", freqHz, mode)
@@ -218,7 +221,7 @@ func (m *channelManager) add(freqHz int, mode, name, channelID string, sr SmartR
 	}
 
 	inst := newInstance(freqHz, 0, mode, m.ubersdrURL, m.password, name, bandwidthHz)
-	ch := newRecChannel(inst, m.store, m.hub, m.segmentSecs, channelID, sr, sched)
+	ch := newRecChannel(inst, m.store, m.hub, m.segmentSecs, channelID, sr, sched, an, m.analyzer)
 	m.channels = append(m.channels, ch)
 	m.wg.Add(1)
 	go func() {
@@ -255,6 +258,33 @@ func (m *channelManager) setSchedule(label string, sched ScheduleConfig) error {
 		}
 	}
 	return fmt.Errorf("channel %q not found", label)
+}
+
+// setAnalysis updates the analysis opt-in for a channel by label.
+// Returns error if the channel is not found.
+func (m *channelManager) setAnalysis(label string, an AnalysisConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ch := range m.channels {
+		if ch.label == label {
+			ch.setAnalysis(an)
+			return nil
+		}
+	}
+	return fmt.Errorf("channel %q not found", label)
+}
+
+// analysisFor returns a channel's analysis opt-in and filter bandwidth by its
+// stable ID.
+func (m *channelManager) analysisFor(channelID string) (AnalysisConfig, int, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, ch := range m.channels {
+		if ch.channelID == channelID {
+			return ch.getAnalysis(), ch.inst.getBandwidth(), true
+		}
+	}
+	return AnalysisConfig{}, 0, false
 }
 
 // setBandwidth updates the filter bandwidth for a channel by label.
@@ -358,6 +388,7 @@ func (m *channelManager) save() {
 			Schedule:    ch.getSchedule(),
 			BandwidthHz: ch.inst.getBandwidth(),
 			MaxMB:       maxMB,
+			Analysis:    ch.getAnalysis(),
 		})
 	}
 	m.mu.RUnlock()
@@ -399,7 +430,7 @@ func (m *channelManager) load() {
 		return
 	}
 	for _, cfg := range cfgs {
-		if _, err := m.add(cfg.FreqHz, cfg.Mode, cfg.Name, cfg.ID, cfg.SmartRecord, cfg.Schedule, cfg.BandwidthHz); err != nil {
+		if _, err := m.add(cfg.FreqHz, cfg.Mode, cfg.Name, cfg.ID, cfg.SmartRecord, cfg.Schedule, cfg.BandwidthHz, cfg.Analysis); err != nil {
 			log.Printf("[manager] load: %v", err)
 			continue
 		}
@@ -418,6 +449,25 @@ func (m *channelManager) load() {
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
+
+func envBoolOr(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+		log.Printf("[main] ignoring %s=%q: not true/false", key, v)
+	}
+	return def
+}
+
+func envFloatOr(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
 
 func envInt64Or(key string, def int64) int64 {
 	if v := os.Getenv(key); v != "" {
@@ -445,6 +495,27 @@ func main() {
 
 		maxStorageMB = flag.Int64("max-storage-mb", envInt64Or("MAX_STORAGE_MB", 20480),
 			"Maximum total storage in MB across all channels; 0 = unlimited, default 20480 (20 GB) (env: MAX_STORAGE_MB)")
+
+		// Optional analysis (analysis.go). Off by default; each channel also
+		// opts in from the web UI.
+		classify = flag.Bool("classify", envBoolOr("CLASSIFY", false),
+			"Classify closed segments as voice/music/noise (env: CLASSIFY)")
+		classifyModel = flag.String("classify-model", envOr("CLASSIFY_MODEL", "mn10"),
+			"Classifier: "+strings.Join(classifyModels, ", ")+" (env: CLASSIFY_MODEL)")
+		classifyThreads = flag.Int("classify-threads", envIntOr("CLASSIFY_THREADS", 1),
+			"CPU threads for the classifier (env: CLASSIFY_THREADS)")
+		transcribe = flag.Bool("transcribe", envBoolOr("TRANSCRIBE", false),
+			"Transcribe closed segments with Whisper (env: TRANSCRIBE)")
+		whisperHelper = flag.String("whisper-helper", envOr("WHISPER_HELPER", "whisper-helper"),
+			"Path to UberSDR's whisper-helper binary (env: WHISPER_HELPER)")
+		whisperModel = flag.String("whisper-model", envOr("WHISPER_MODEL", "base"),
+			"Whisper model: "+strings.Join(whisperModelNames(), ", ")+" (env: WHISPER_MODEL)")
+		whisperThreads = flag.Int("whisper-threads", envIntOr("WHISPER_THREADS", 2),
+			"CPU threads for Whisper (env: WHISPER_THREADS)")
+		whisperSpeed = flag.Float64("whisper-speed", envFloatOr("WHISPER_SPEED", 1.0),
+			"Feed segments to Whisper at this multiple of real time, 0.5-8 (env: WHISPER_SPEED)")
+		modelDir = flag.String("model-dir", envOr("MODEL_DIR", ""),
+			"Where downloaded models are kept; default <output>/models (env: MODEL_DIR)")
 	)
 
 	flag.Parse()
@@ -452,6 +523,25 @@ func main() {
 	if *ubersdrURL == "" {
 		fmt.Fprintln(os.Stderr, "error: -url (or UBERSDR_URL env) is required")
 		flag.Usage()
+		os.Exit(1)
+	}
+
+	anSettings := analysisSettings{
+		Classify:        *classify,
+		ClassifyModel:   *classifyModel,
+		ClassifyThreads: *classifyThreads,
+		Transcribe:      *transcribe,
+		WhisperHelper:   *whisperHelper,
+		WhisperModel:    *whisperModel,
+		WhisperThreads:  *whisperThreads,
+		WhisperSpeed:    *whisperSpeed,
+		ModelDir:        *modelDir,
+	}
+	if anSettings.ModelDir == "" {
+		anSettings.ModelDir = filepath.Join(*outputDir, "models")
+	}
+	if err := anSettings.validate(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 
@@ -486,14 +576,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	mgr := newChannelManager(ctx, *ubersdrURL, *password, *segmentSecs, store, hub, configPath, qc)
+	az := newAnalyzer(anSettings, store, hub)
+	az.start(ctx)
+
+	mgr := newChannelManager(ctx, *ubersdrURL, *password, *segmentSecs, store, hub, configPath, qc, az)
 
 	// Load persisted channels from channels.json.
 	mgr.load()
 
+	// Segments a restart left pending, now that their channels are known.
+	az.channelLookup = mgr.analysisFor
+	az.requeuePending()
+
 	// Start HTTP server in background.
 	go func() {
-		if err := startHTTPServer(*listenAddr, store, hub, mgr, *uiPassword, rc, retentionCfgPath, qc, quotaCfgPath); err != nil {
+		if err := startHTTPServer(*listenAddr, store, hub, mgr, *uiPassword, rc, retentionCfgPath, qc, quotaCfgPath, az); err != nil {
 			log.Fatalf("[main] HTTP server: %v", err)
 		}
 	}()
