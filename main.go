@@ -479,6 +479,19 @@ func envBoolOr(key string, def bool) bool {
 	return def
 }
 
+// envSpeedOr reads WHISPER_SPEED: "auto" or unset means adaptive (0).
+func envSpeedOr(key string) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" || strings.EqualFold(v, "auto") {
+		return 0
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	log.Printf("[main] ignoring %s=%q: not \"auto\" or a number", key, v)
+	return 0
+}
+
 func envFloatOr(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -531,8 +544,8 @@ func main() {
 			"Whisper model: "+strings.Join(whisperModelNames(), ", ")+" (env: WHISPER_MODEL)")
 		whisperThreads = flag.Int("whisper-threads", envIntOr("WHISPER_THREADS", 2),
 			"CPU threads for Whisper (env: WHISPER_THREADS)")
-		whisperSpeed = flag.Float64("whisper-speed", envFloatOr("WHISPER_SPEED", 1.0),
-			"Feed segments to Whisper at this multiple of real time, 0.5-8 (env: WHISPER_SPEED)")
+		whisperSpeed = flag.Float64("whisper-speed", envSpeedOr("WHISPER_SPEED"),
+			"Pace segments are fed to Whisper at, x real time: 0.5-8, or 0 = auto (adapts to the host; default) (env: WHISPER_SPEED, \"auto\" or a number)")
 		modelDir = flag.String("model-dir", envOr("MODEL_DIR", ""),
 			"Where downloaded models are kept; default <output>/models (env: MODEL_DIR)")
 	)

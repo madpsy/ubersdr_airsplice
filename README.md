@@ -77,7 +77,7 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
 | `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
 | `WHISPER_THREADS` | `2` | CPU threads for Whisper |
-| `WHISPER_SPEED` | `1.0` | Feed audio to Whisper at this multiple of real time (0.5–8) |
+| `WHISPER_SPEED` | `auto` | Pace audio is fed to Whisper at: `auto` adapts to the host (2× to 8× real time), or a fixed multiple (0.5–8) |
 | `MODEL_DIR` | `<OUTPUT_DIR>/models` | Where downloaded models are kept |
 
 Channels are **not** configured via environment variables — they are added and removed through the web UI and persisted to `channels.json` in the output directory.
@@ -199,9 +199,9 @@ The published image (`madpsy/ubersdr_airsplice`, built by `./docker.sh`) include
 
 The Whisper model and the VAD model are downloaded into `MODEL_DIR` when a channel first uses transcription, from Hugging Face URLs pinned to a commit and checked against a pinned size and SHA-256 (the same pins as UberSDR's `models.json`). `base` is about 60 MB, `tiny` 32 MB, `small` 190 MB.
 
-Per channel you choose the **language** (or automatic detection) and whether to **only transcribe segments classified as voice** (which needs classification on for the channel too).
+Per channel you choose the **language** (or automatic detection) and whether to **only transcribe voice** (on by default; needs classification on for the channel too). With it, segments without voice are skipped, and within a segment only the 10-second windows classified as voice are sent to Whisper — music, jingles and noise between speech are not transcribed (no song lyrics), and cost no Whisper time. Each transcript says how much was left out.
 
-Whisper's helper is built for live audio: it skips audio once it is more than 10 s behind. Segments are therefore streamed to it at `WHISPER_SPEED` × real time, one at a time; a transcript the helper fell behind on is marked *partial*. At the default 1.0 one helper keeps up with one channel's worth of continuous audio — transcription suits VOX and scheduled channels best. When the queue (32 segments) is full the oldest waiting segment is skipped.
+Whisper's helper is built for live audio: it skips audio once it is more than 10 s behind and never says how far through it is, so segments are fed at a set pace, one at a time. With `WHISPER_SPEED=auto` (the default) the pace adapts to the host: it starts at 2× real time and rises after each segment the helper keeps up with, up to 8×; if the helper falls behind, that attempt is abandoned at once, the pace halved and the segment transcribed again, so adapting never costs a transcript. Only if the helper cannot keep up even at 1× is a transcript marked *partial*. The current pace is shown in the channel settings. A fixed `WHISPER_SPEED` feeds at that pace. When the queue (32 segments) is full the oldest waiting segment is skipped.
 
 ### Results
 
@@ -318,7 +318,7 @@ All flags:
 | `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
 | `-whisper-model` | `base` | `tiny`, `base` or `small` |
 | `-whisper-threads` | `2` | CPU threads for Whisper |
-| `-whisper-speed` | `1.0` | Multiple of real time to feed Whisper |
+| `-whisper-speed` | `0` (auto) | Pace to feed Whisper, × real time; 0 = auto |
 | `-model-dir` | `<output>/models` | Downloaded model cache |
 
 ---

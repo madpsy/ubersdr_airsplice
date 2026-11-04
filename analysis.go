@@ -57,7 +57,7 @@ type analysisSettings struct {
 	WhisperHelper   string
 	WhisperModel    string
 	WhisperThreads  int
-	WhisperSpeed    float64 // audio fed to the helper at this multiple of real time
+	WhisperSpeed    float64 // feed pace, x real time; 0 = auto (adaptive)
 	ModelDir        string
 }
 
@@ -88,8 +88,8 @@ func (s *analysisSettings) validate() error {
 		if s.WhisperThreads < 1 {
 			return fmt.Errorf("WHISPER_THREADS must be at least 1")
 		}
-		if s.WhisperSpeed < 0.5 || s.WhisperSpeed > 8 {
-			return fmt.Errorf("WHISPER_SPEED must be between 0.5 and 8")
+		if s.WhisperSpeed != 0 && (s.WhisperSpeed < 0.5 || s.WhisperSpeed > 8) {
+			return fmt.Errorf("WHISPER_SPEED must be auto or between 0.5 and 8")
 		}
 	}
 	return nil
@@ -125,14 +125,18 @@ type classificationResult struct {
 }
 
 type transcriptResult struct {
-	Status   string    `json:"status"`
-	Language string    `json:"language,omitempty"` // the language asked for ("auto" = detected by Whisper)
-	Model    string    `json:"model,omitempty"`
-	Text     string    `json:"text,omitempty"`
-	Lines    []string  `json:"lines,omitempty"`   // one per utterance
-	Partial  bool      `json:"partial,omitempty"` // the helper fell behind and skipped some audio
-	Reason   string    `json:"reason,omitempty"`
-	At       time.Time `json:"at,omitempty"`
+	Status   string   `json:"status"`
+	Language string   `json:"language,omitempty"` // the language asked for ("auto" = detected by Whisper)
+	Model    string   `json:"model,omitempty"`
+	Text     string   `json:"text,omitempty"`
+	Lines    []string `json:"lines,omitempty"`   // one per utterance
+	Partial  bool     `json:"partial,omitempty"` // the helper fell behind and skipped some audio
+	Speed    float64  `json:"speed,omitempty"`   // feed pace used, x real time
+	// SkippedSec is the audio not sent to Whisper because the classifier heard
+	// music or noise there (Only transcribe voice).
+	SkippedSec float64   `json:"skipped_sec,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
+	At         time.Time `json:"at,omitempty"`
 }
 
 // minAnalysisSec: shorter segments are skipped. The classifier needs a second
@@ -157,6 +161,7 @@ type analysisJob struct {
 	mode       string // the channel's audio mode and filter bandwidth, which
 	bwHz       int    // set the classifier's band (analysisBand)
 	durSec     float64
+	voice      *voiceMask // windows to transcribe (nil = all), from the classification
 	snrAvg     float32
 	snrCount   int
 	classify   bool
@@ -280,8 +285,12 @@ func (a *analyzer) start(ctx context.Context) {
 		log.Printf("[analysis] classification available (model %s, loaded when a channel opts in)", a.settings.ClassifyModel)
 	}
 	if a.whisper != nil {
-		log.Printf("[analysis] transcription available (model %s, %d threads, %.1fx real time, loaded when a channel opts in)",
-			a.settings.WhisperModel, a.settings.WhisperThreads, a.settings.WhisperSpeed)
+		pace := "auto"
+		if a.settings.WhisperSpeed > 0 {
+			pace = fmt.Sprintf("%.1fx real time", a.settings.WhisperSpeed)
+		}
+		log.Printf("[analysis] transcription available (model %s, %d threads, pace %s, loaded when a channel opts in)",
+			a.settings.WhisperModel, a.settings.WhisperThreads, pace)
 	}
 	go a.classifyWorkerCtx(ctx)
 	go a.transcribeWorker(ctx)
@@ -418,6 +427,9 @@ func (a *analyzer) classifyWorkerCtx(ctx context.Context) {
 			res := a.runClassify(ctx, j)
 			label = res.Label
 			a.update(j.recID, func(an *segmentAnalysis) { an.Classification = res })
+			if j.cfg.VoiceOnly && res.Status == analysisDone {
+				j.voice = newVoiceMask(res)
+			}
 		}
 		if !j.transcribe {
 			continue
@@ -693,4 +705,41 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 		return sa.Tags[i].Tag < sa.Tags[j].Tag
 	})
 	return &sa
+}
+
+// voiceMask says which stretches of a segment the classifier heard voice in,
+// so only those are sent to Whisper (Only transcribe voice): music and noise
+// inside a speech segment are not transcribed, and cost no Whisper time.
+type voiceMask struct {
+	win   int // samples per window at analysisRate
+	voice []bool
+}
+
+func newVoiceMask(c *classificationResult) *voiceMask {
+	if len(c.Windows) == 0 {
+		return nil
+	}
+	win := eatWindow
+	if strings.HasPrefix(c.Backend, "dsp") {
+		win = dspWindowSec
+	}
+	m := &voiceMask{win: int(win * analysisRate)}
+	for _, w := range c.Windows {
+		m.voice = append(m.voice, w == "voice")
+	}
+	return m
+}
+
+// at reports whether sample pos (at analysisRate) is in a voice window. The
+// classifier drops a short final window; audio past its last window takes the
+// last window's verdict. A nil mask sends everything.
+func (m *voiceMask) at(pos int) bool {
+	if m == nil || len(m.voice) == 0 {
+		return true
+	}
+	i := pos / m.win
+	if i >= len(m.voice) {
+		i = len(m.voice) - 1
+	}
+	return m.voice[i]
 }

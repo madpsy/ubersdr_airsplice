@@ -540,6 +540,9 @@ func fakeHelper(mode string) {
 	var session int64
 	var lang string
 	heard, spoken := false, false
+	var t0 time.Time
+	var samples int
+	warned := false
 	for {
 		var head [5]byte
 		if _, err := io.ReadFull(in, head[:]); err != nil {
@@ -557,10 +560,22 @@ func fakeHelper(mode string) {
 			}
 			_ = json.Unmarshal(body, &st)
 			session, lang, heard, spoken = st.Session, st.Lang, false, false
+			t0, samples, warned = time.Time{}, 0, false
 			if mode == "behind" {
 				say(map[string]interface{}{"type": "error", "session": session, "code": "falling-behind", "message": "behind", "fatal": false})
 			}
 		case frameAudio:
+			// "rate": falls behind when audio arrives faster than 3x real time.
+			if mode == "rate" {
+				if t0.IsZero() {
+					t0 = time.Now()
+				}
+				samples += len(body) / 2
+				if el := time.Since(t0).Seconds(); !warned && samples > 16000 && float64(samples)/16000 > 3*el+0.3 {
+					warned = true
+					say(map[string]interface{}{"type": "error", "session": session, "code": "falling-behind", "message": "behind", "fatal": false})
+				}
+			}
 			silent := true
 			for i := 0; i+1 < len(body); i += 2 {
 				if v := int16(binary.LittleEndian.Uint16(body[i:])); v > 300 || v < -300 {
@@ -568,8 +583,9 @@ func fakeHelper(mode string) {
 					break
 				}
 			}
+			// One final per utterance: sound followed by silence.
 			if !silent {
-				heard = true
+				heard, spoken = true, false
 			} else if heard && !spoken {
 				spoken = true
 				if mode == "crash" {
@@ -840,5 +856,87 @@ func TestChannelRecordingAnalysis(t *testing.T) {
 	}
 	if s.channelRecordingAnalysis("other") != nil {
 		t.Fatal("a channel with no segments got a summary")
+	}
+}
+
+// WHISPER_SPEED=auto speeds up after segments the helper keeps up with, and
+// on falling behind retries the segment slower rather than keep a partial.
+func TestWhisperAutoPaceAdapts(t *testing.T) {
+	s := newTestStore(t)
+	r := addTestSegment(t, s, babble(12000, 6), 12000, 20)
+	set := fakeWhisperSettings(t, "rate") // falls behind above 3x real time
+	set.WhisperSpeed = 0                  // auto
+	w := readyRunner(t, set)
+	job := analysisJob{recID: r.ID, wavPath: filepath.Join(s.outputDir, r.Filename)}
+	var speeds []float64
+	for i := 0; i < 3; i++ {
+		res := w.transcribe(context.Background(), job)
+		if res.Status != analysisDone || res.Partial || res.Text == "" {
+			t.Fatalf("segment %d: %+v", i, res)
+		}
+		speeds = append(speeds, res.Speed)
+	}
+	// 2x, then 2.5x, then 3.125x falls behind and is retried at ~1.56x.
+	if speeds[0] != 2 || speeds[1] != 2.5 || speeds[2] > 3 || speeds[2] < 1 {
+		t.Fatalf("paces %v", speeds)
+	}
+}
+
+func TestWhisperAutoPaceFloorKeepsPartial(t *testing.T) {
+	s := newTestStore(t)
+	r := addTestSegment(t, s, babble(12000, 2), 12000, 20)
+	set := fakeWhisperSettings(t, "behind") // always falls behind
+	set.WhisperSpeed = 0
+	w := readyRunner(t, set)
+	res := w.transcribe(context.Background(), analysisJob{recID: r.ID, wavPath: filepath.Join(s.outputDir, r.Filename)})
+	if res.Status != analysisDone || !res.Partial || res.Speed != whisperAutoMin {
+		t.Fatalf("%+v", res)
+	}
+	if w.currentSpeed() != whisperAutoMin {
+		t.Fatalf("pace %v after falling behind at the floor", w.currentSpeed())
+	}
+}
+
+func TestVoiceMask(t *testing.T) {
+	m := newVoiceMask(&classificationResult{Backend: "mn10", Windows: []string{"voice", "music", "voice"}})
+	w := int(eatWindow * analysisRate)
+	for _, c := range []struct {
+		pos  int
+		want bool
+	}{{0, true}, {w - 1, true}, {w, false}, {2*w - 1, false}, {2 * w, true}, {5 * w, true}} {
+		if got := m.at(c.pos); got != c.want {
+			t.Errorf("at(%d) = %v", c.pos, got)
+		}
+	}
+	if d := newVoiceMask(&classificationResult{Backend: "dsp+snr", Windows: []string{"noise"}}); d.win != int(dspWindowSec*analysisRate) || d.at(0) {
+		t.Errorf("dsp mask %+v", d)
+	}
+	var none *voiceMask
+	if !none.at(123) || newVoiceMask(&classificationResult{}) != nil {
+		t.Error("no mask must send everything")
+	}
+}
+
+// Only voice windows reach Whisper: music between two stretches of speech is
+// skipped, and the speech either side is transcribed as separate utterances.
+func TestWhisperSendsOnlyVoiceWindows(t *testing.T) {
+	s := newTestStore(t)
+	x := append(append(babble(12000, eatWindow), chords(12000, eatWindow)...), babble(12000, eatWindow)...)
+	r := addTestSegment(t, s, x, 12000, 20)
+	w := readyRunner(t, fakeWhisperSettings(t, "ok"))
+	job := analysisJob{recID: r.ID, wavPath: filepath.Join(s.outputDir, r.Filename),
+		voice: newVoiceMask(&classificationResult{Backend: "mn10", Windows: []string{"voice", "music", "voice"}})}
+	res := w.transcribe(context.Background(), job)
+	if res.Status != analysisDone || len(res.Lines) != 2 {
+		t.Fatalf("with the mask: %+v", res)
+	}
+	if res.SkippedSec < 9.9 || res.SkippedSec > 10.1 {
+		t.Fatalf("skipped %.1f s, want 10", res.SkippedSec)
+	}
+	// Without the mask the music is sent too: one continuous stretch of sound.
+	job.voice = nil
+	res = w.transcribe(context.Background(), job)
+	if res.Status != analysisDone || len(res.Lines) != 1 || res.SkippedSec != 0 {
+		t.Fatalf("without the mask: %+v", res)
 	}
 }

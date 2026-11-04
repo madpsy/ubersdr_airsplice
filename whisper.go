@@ -7,9 +7,15 @@
 // side drives it:
 //
 //   - It drops audio once it is more than 10 s behind, and says so once with a
-//     non-fatal "falling-behind" error. A finished segment is therefore fed at
-//     about real time (WHISPER_SPEED), never all at once, and a transcript the
-//     helper fell behind on is marked partial.
+//     non-fatal "falling-behind" error, but never says how far through it is.
+//     A finished segment is therefore fed at a set pace, never all at once.
+//     With WHISPER_SPEED=auto (the default) the pace adapts: it starts at 2x
+//     real time and rises by a quarter after each segment the helper keeps up
+//     with, to at most 8x; when the helper falls behind, that attempt is
+//     abandoned at once, the pace halved, and the segment transcribed again,
+//     so adapting never costs a transcript. Only a helper that cannot keep up
+//     even at 1x leaves a transcript marked partial. A fixed WHISPER_SPEED
+//     feeds at that pace and marks what the helper fell behind on partial.
 //   - It transcribes an utterance when the VAD decides it has ended, and STOP
 //     does not flush one in progress. So each segment is followed by a second
 //     and a half of silence, and the session is held open until the finals
@@ -30,6 +36,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -128,6 +135,8 @@ type whisperRunner struct {
 
 	helperPath, modelPath, vadPath string
 
+	speed float64 // current feed pace, x real time (adaptive unless WHISPER_SPEED is set)
+
 	// procMu serialises use of the helper process. It is held for a whole
 	// segment, so it is separate from mu, which status() takes.
 	procMu  sync.Mutex
@@ -138,7 +147,34 @@ type whisperRunner struct {
 }
 
 func newWhisperRunner(s analysisSettings) *whisperRunner {
-	return &whisperRunner{settings: s, state: "idle", readyCh: make(chan struct{})}
+	speed := s.WhisperSpeed
+	if speed <= 0 { // auto
+		speed = whisperAutoStart
+	}
+	return &whisperRunner{settings: s, state: "idle", readyCh: make(chan struct{}), speed: speed}
+}
+
+// The adaptive pace (WHISPER_SPEED=auto): where it starts, its bounds, and
+// how far it rises after a segment the helper kept up with.
+const (
+	whisperAutoStart = 2.0
+	whisperAutoMin   = 1.0
+	whisperAutoMax   = 8.0
+	whisperAutoStep  = 1.25
+)
+
+func (w *whisperRunner) adaptive() bool { return w.settings.WhisperSpeed <= 0 }
+
+func (w *whisperRunner) currentSpeed() float64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.speed
+}
+
+func (w *whisperRunner) setSpeed(v float64) {
+	w.mu.Lock()
+	w.speed = math.Max(whisperAutoMin, math.Min(whisperAutoMax, v))
+	w.mu.Unlock()
 }
 
 // begin starts prepare the first time something needs transcription: a
@@ -161,7 +197,7 @@ func (w *whisperRunner) setState(state, msg string) {
 func (w *whisperRunner) status() map[string]interface{} {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := map[string]interface{}{"state": w.state}
+	out := map[string]interface{}{"state": w.state, "speed": math.Round(w.speed*10) / 10, "adaptive": w.adaptive()}
 	if w.errMsg != "" {
 		out["error"] = w.errMsg
 	}
@@ -402,29 +438,57 @@ func writeFrame(wr io.Writer, typ byte, payload []byte) error {
 	return nil
 }
 
-// transcribe runs one segment through the helper.
+// transcribe runs one segment through the helper, adapting the pace when
+// WHISPER_SPEED is auto (see the top of this file).
 func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcriptResult {
-	res := &transcriptResult{Model: w.settings.WhisperModel, Language: langOrAuto(j.cfg.Language)}
+	if !w.adaptive() {
+		res, _ := w.transcribeOnce(ctx, j, w.settings.WhisperSpeed, false)
+		return res
+	}
+	for {
+		speed := w.currentSpeed()
+		// Above 1x, an attempt the helper falls behind on is abandoned and
+		// retried slower; at 1x there is nothing slower, so it completes.
+		res, behind := w.transcribeOnce(ctx, j, speed, speed > whisperAutoMin)
+		if behind {
+			w.setSpeed(speed / 2)
+			log.Printf("[whisper] fell behind at %.1fx real time; retrying the segment at %.1fx", speed, w.currentSpeed())
+			continue
+		}
+		if res.Status == analysisDone && !res.Partial {
+			w.setSpeed(speed * whisperAutoStep)
+		}
+		return res
+	}
+}
+
+// transcribeOnce feeds one segment at `speed` x real time. With abortOnBehind
+// it stops as soon as the helper reports falling behind and returns behind
+// true (the result is then meaningless); otherwise a transcript the helper
+// fell behind on is marked partial.
+func (w *whisperRunner) transcribeOnce(ctx context.Context, j analysisJob, speed float64, abortOnBehind bool) (*transcriptResult, bool) {
+	res := &transcriptResult{Model: w.settings.WhisperModel, Language: langOrAuto(j.cfg.Language), Speed: speed}
 	fail := func(status, reason string) *transcriptResult {
 		res.Status, res.Reason, res.At = status, reason, time.Now().UTC()
 		return res
 	}
+	fail2 := func(status, reason string) (*transcriptResult, bool) { return fail(status, reason), false }
 	w.begin(ctx)
 	select {
 	case <-w.readyCh:
 	case <-ctx.Done():
-		return fail(analysisSkipped, "shutting down")
+		return fail2(analysisSkipped, "shutting down")
 	}
 	w.mu.Lock()
 	state, errMsg := w.state, w.errMsg
 	w.mu.Unlock()
 	if state != "ready" {
-		return fail(analysisFailed, "transcription unavailable: "+errMsg)
+		return fail2(analysisFailed, "transcription unavailable: "+errMsg)
 	}
 
 	wav, err := openWAVStream(j.wavPath)
 	if err != nil {
-		return fail(analysisFailed, err.Error())
+		return fail2(analysisFailed, err.Error())
 	}
 	defer wav.Close()
 	audio := newResampledReader(wav, wav.rate, analysisRate) // streamed, 100 ms at a time
@@ -434,7 +498,7 @@ func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcri
 	if w.proc == nil {
 		if err := w.startHelper(); err != nil {
 			log.Printf("[whisper] %v", err)
-			return fail(analysisFailed, err.Error())
+			return fail2(analysisFailed, err.Error())
 		}
 	}
 	w.session++
@@ -442,7 +506,7 @@ func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcri
 	start, _ := json.Marshal(map[string]interface{}{"lang": res.Language, "session": sess})
 	if err := writeFrame(w.stdin, frameStart, start); err != nil {
 		w.stopHelper()
-		return fail(analysisFailed, "helper: "+err.Error())
+		return fail2(analysisFailed, "helper: "+err.Error())
 	}
 
 	var finals []string
@@ -483,43 +547,90 @@ func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcri
 		}
 	}
 
-	// Feed the audio and the closing silence at WHISPER_SPEED x real time.
+	// Feed the audio at `speed` x real time. With a voice mask, only the
+	// windows the classifier heard voice in are sent; each run of skipped
+	// windows is marked by a short silence so the utterance before it closes.
+	// Skipped audio costs no time. Then the closing silence.
 	pcm := make([]byte, whisperFrameSamples*2)
-	frameDur := time.Duration(float64(time.Second) * float64(whisperFrameSamples) / analysisRate / w.settings.WhisperSpeed)
+	frameDur := time.Duration(float64(time.Second) * float64(whisperFrameSamples) / analysisRate / speed)
 	t0 := time.Now()
-	silence := whisperTailSilence // sent once the audio runs out
-	for k := 0; ; k++ {
+	sent := 0 // frames sent, for pacing
+	const (
+		feedOK = iota
+		feedEnd
+		feedBehind
+		feedErr
+	)
+	var sendErr error
+	send := func(frame []float32) int {
+		for s, v := range frame {
+			binary.LittleEndian.PutUint16(pcm[2*s:], uint16(floatToInt16(v)))
+		}
+		if err := writeFrame(w.stdin, frameAudio, pcm[:2*len(frame)]); err != nil {
+			sendErr = err
+			return feedErr
+		}
+		if !drain() || fatal != nil {
+			return feedEnd
+		}
+		if partial && abortOnBehind {
+			return feedBehind
+		}
+		sent++
+		if wait := time.Until(t0.Add(time.Duration(sent) * frameDur)); wait > 0 {
+			time.Sleep(wait)
+		}
+		return feedOK
+	}
+	silenceFrames := func(n int) int {
+		for n > 0 {
+			f := make([]float32, min(whisperFrameSamples, n))
+			n -= len(f)
+			if r := send(f); r != feedOK {
+				return r
+			}
+		}
+		return feedOK
+	}
+	pos, skipped := 0, 0 // samples read / skipped as not voice
+	inGap, anyVoice := false, false
+	status := feedOK
+	for status == feedOK {
 		if ctx.Err() != nil {
 			_ = writeFrame(w.stdin, frameStop, nil)
-			return fail(analysisSkipped, "shutting down")
+			return fail2(analysisSkipped, "shutting down")
 		}
 		frame, rerr := audio.next(whisperFrameSamples)
 		if rerr != nil {
 			_ = writeFrame(w.stdin, frameStop, nil)
-			return fail(analysisFailed, rerr.Error())
+			return fail2(analysisFailed, rerr.Error())
 		}
 		if len(frame) == 0 {
-			if silence <= 0 {
-				break
-			}
-			frame = make([]float32, min(whisperFrameSamples, silence))
-			silence -= len(frame)
-		}
-		n := len(frame)
-		for s, v := range frame {
-			binary.LittleEndian.PutUint16(pcm[2*s:], uint16(floatToInt16(v)))
-		}
-		if err := writeFrame(w.stdin, frameAudio, pcm[:2*n]); err != nil {
-			w.stopHelper()
-			return fail(analysisFailed, "helper: "+err.Error())
-		}
-		if !drain() || fatal != nil {
+			status = silenceFrames(whisperTailSilence)
 			break
 		}
-		if wait := time.Until(t0.Add(time.Duration(k+1) * frameDur)); wait > 0 {
-			time.Sleep(wait)
+		voice := j.voice.at(pos)
+		pos += len(frame)
+		if !voice {
+			skipped += len(frame)
+			if anyVoice && !inGap {
+				inGap = true
+				status = silenceFrames(whisperTailSilence) // close the utterance before the gap
+			}
+			continue
 		}
+		inGap, anyVoice = false, true
+		status = send(frame)
 	}
+	switch status {
+	case feedErr:
+		w.stopHelper()
+		return fail2(analysisFailed, "helper: "+sendErr.Error())
+	case feedBehind:
+		_ = writeFrame(w.stdin, frameStop, nil) // its remaining lines are ignored by session
+		return res, true
+	}
+	res.SkippedSec = math.Round(float64(skipped)/analysisRate*10) / 10
 
 	// Wait for the last finals: done once nothing has arrived for a while.
 	deadline := time.Now().Add(whisperMaxSettle)
@@ -551,16 +662,19 @@ wait:
 	}
 	if fatal != nil {
 		w.stopHelper() // restarted on the next segment
-		return fail(analysisFailed, fatal.Error())
+		return fail2(analysisFailed, fatal.Error())
 	}
 	_ = writeFrame(w.stdin, frameStop, nil)
+	if partial && abortOnBehind {
+		return res, true
+	}
 
 	res.Status = analysisDone
 	res.Lines = finals
 	res.Text = strings.Join(finals, " ")
 	res.Partial = partial
 	res.At = time.Now().UTC()
-	return res
+	return res, false
 }
 
 func floatToInt16(v float32) int16 {

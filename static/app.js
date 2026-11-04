@@ -434,7 +434,10 @@ function transcribeHostNote() {
     case 'idle':        return `Whisper ${t.model} · loads when a channel uses it`;
     case 'starting':    return 'Starting…';
     case 'downloading': return `Downloading the ${t.model} model… ${Math.round((t.progress || 0) * 100)}%`;
-    case 'ready':       return `Whisper ${t.model}` + (t.queued ? ` · ${t.queued} queued` : '');
+    case 'ready': {
+      const pace = t.speed ? ` · ${t.adaptive ? 'auto, now ' : ''}${Number(t.speed).toFixed(1)}× real time` : '';
+      return `Whisper ${t.model}${pace}` + (t.queued ? ` · ${t.queued} queued` : '');
+    }
     default:            return `Unavailable: ${t.error || t.state}`;
   }
 }
@@ -480,9 +483,9 @@ function buildAnalysisFields(an) {
         </label>
         <label class="an-check">
           <input type="checkbox" class="an-voice-only"${an.voice_only ? ' checked' : ''} />
-          Only transcribe segments classified as voice
+          Only transcribe voice (skip music and noise)
         </label>
-        <div class="an-note">Needs classification on for this channel; otherwise every segment is transcribed.</div>
+        <div class="an-note">Whisper hears only the parts classified as voice, and segments without voice are skipped. Needs classification on for this channel.</div>
       </div>
     </div>`;
 }
@@ -693,6 +696,7 @@ function segTranscriptHTML(seg) {
   const lines = (t.lines && t.lines.length ? t.lines : [t.text])
     .map(l => `<p>${escHtml(l)}</p>`).join('');
   let meta = `Whisper ${escHtml(t.model || '')} · ${escHtml(t.language && t.language !== 'auto' ? langName(t.language) : 'language detected automatically')}`;
+  if (t.skipped_sec) meta += ` · ${escHtml(fmtDuration(t.skipped_sec))} of music / noise not transcribed`;
   if (t.partial) meta += ' · partial: the transcriber fell behind and skipped some audio';
   return `${lines}<div class="an-tx-meta">${meta}</div>`;
 }

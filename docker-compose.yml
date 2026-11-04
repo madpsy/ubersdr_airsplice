@@ -28,6 +28,7 @@ services:
       # WHISPER_HELPER: "/opt/whisper/whisper-helper"   # included in the published image
       # WHISPER_MODEL: "base"    # tiny | base | small (downloaded to /data/models on first use)
       # WHISPER_THREADS: "2"
+      # WHISPER_SPEED: "auto"    # pace fed to Whisper: auto (adapts, 2-8x real time) or a fixed multiple
     networks:
       - sdr-network
     volumes:
