@@ -802,21 +802,31 @@ type eatRunner struct {
 	threads int
 
 	mu       sync.Mutex
-	state    string // starting | downloading | ready | failed
+	state    string // idle | starting | downloading | ready | failed
 	errMsg   string
 	progress float64
 	model    *eatModel
 	readyCh  chan struct{}
+	once     sync.Once
 }
 
 func newEATRunner(s analysisSettings) *eatRunner {
 	info := eatModels[s.ClassifyModel]
 	return &eatRunner{name: s.ClassifyModel, width: info.width, pin: info.pin, dir: s.ModelDir,
-		threads: max(1, s.ClassifyThreads), state: "starting", readyCh: make(chan struct{})}
+		threads: max(1, s.ClassifyThreads), state: "idle", readyCh: make(chan struct{})}
+}
+
+// begin starts prepare the first time something needs the model: a channel
+// opting in, or a segment queued. Until then nothing is downloaded or loaded.
+func (r *eatRunner) begin(ctx context.Context) {
+	r.once.Do(func() { go r.prepare(ctx) })
 }
 
 func (r *eatRunner) prepare(ctx context.Context) {
 	defer close(r.readyCh)
+	r.mu.Lock()
+	r.state = "starting"
+	r.mu.Unlock()
 	fail := func(err error) {
 		r.mu.Lock()
 		r.state, r.errMsg = "failed", err.Error()
@@ -849,6 +859,7 @@ func (r *eatRunner) prepare(ctx context.Context) {
 
 // get waits for prepare and returns the model, or nil and the reason.
 func (r *eatRunner) get(ctx context.Context) (*eatModel, string) {
+	r.begin(ctx)
 	select {
 	case <-r.readyCh:
 	case <-ctx.Done():

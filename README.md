@@ -70,10 +70,10 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `SEGMENT_SECS` | `300` | Rotate to a new WAV file every N seconds; `0` = one continuous file per session |
 | `CLEANUP_ALL_DAYS` | `30` | Delete ALL recordings older than N days; `0` = disabled |
 | `MAX_STORAGE_MB` | `20480` | Maximum total storage in MB across all channels; `0` = unlimited |
-| `CLASSIFY` | `false` | Classify closed segments as voice / music / noise — see [Analysis](#analysis-optional) |
+| `CLASSIFY` | `true` | Offer voice / music / noise classification to channels; `false` turns it off for the host — see [Analysis](#analysis-optional) |
 | `CLASSIFY_MODEL` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` (EfficientAT) or `dsp` (no model) |
 | `CLASSIFY_THREADS` | `1` | CPU threads for the classifier |
-| `TRANSCRIBE` | `false` | Transcribe closed segments with Whisper |
+| `TRANSCRIBE` | `true` | Offer Whisper transcription to channels; `false` turns it off for the host |
 | `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
 | `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
 | `WHISPER_THREADS` | `2` | CPU threads for Whisper |
@@ -161,12 +161,12 @@ Smart Record and Schedule can be combined: the schedule gate controls *when* the
 
 ## Analysis (optional)
 
-Two optional features work on each segment after it closes, in the background, without holding up recording. **Both are off by default.** Each needs two switches:
+Two optional features work on each segment after it closes, in the background, without holding up recording. Each has two switches:
 
-1. **On the host** — `CLASSIFY=true` and/or `TRANSCRIBE=true`. While a feature is off nothing is loaded, downloaded or started for it.
-2. **On the channel** — in the channel's ⚙ Settings, under *Analysis*. A new channel opts in to nothing, so enabling a feature on the host never starts work on a channel by surprise.
+1. **On the host** — `CLASSIFY` and `TRANSCRIBE`, **on unless set to `false`**. They decide whether the host offers the feature to its channels at all.
+2. **On the channel** — in the channel's ⚙ Settings, under *Analysis*, **off for a new channel**. Nothing is analysed until a channel opts in.
 
-The model is chosen once per host, so one model is loaded and results mean the same thing on every channel. In the UI, an option that is off on the host is shown disabled with the setting that turns it on; the channel's saved choice is kept and applies once the feature is enabled.
+A model is downloaded and loaded only when the first channel opts in to the feature that needs it, so a host whose channels never use analysis downloads and loads nothing. The model is chosen once per host, so one model is loaded and results mean the same thing on every channel. In the UI, an option turned off on the host is shown disabled with the setting responsible; the channel's saved choice is kept and applies again if the feature is turned back on.
 
 ### Classification
 
@@ -181,7 +181,7 @@ Labels each segment **voice**, **music**, **voice + music** or **noise**, with t
 
 \* one thread, x86-64 with AVX2, measured on a busy host.
 
-**EfficientAT** ([github.com/fschmid56/EfficientAT](https://github.com/fschmid56/EfficientAT), MIT, © Florian Schmid) are MobileNetV3 audio taggers trained on Google's AudioSet (527 sound classes). They replace the AST transformer NightDX uses (mAP .459) at a small fraction of its cost. airsplice runs them in pure Go, with AVX2/FMA (amd64) and NEON (arm64) kernels for the convolutions; the weights are the official release files, downloaded into `MODEL_DIR` on first start and checked against a pinned size and SHA-256 — no conversion step and no Python. Each 10-second window is tagged, and the strongest voice, music and noise tags among its top 40 decide that window, as in NightDX. The strongest radio-relevant tags ("Speech", "Radio", "Static", …) are kept with the result and shown on hover. If the model cannot be downloaded or loaded, segments are classified with `dsp` instead and the result says so.
+**EfficientAT** ([github.com/fschmid56/EfficientAT](https://github.com/fschmid56/EfficientAT), MIT, © Florian Schmid) are MobileNetV3 audio taggers trained on Google's AudioSet (527 sound classes). They replace the AST transformer NightDX uses (mAP .459) at a small fraction of its cost. airsplice runs them in pure Go, with AVX2/FMA (amd64) and NEON (arm64) kernels for the convolutions; the weights are the official release files, downloaded into `MODEL_DIR` when a channel first uses classification and checked against a pinned size and SHA-256 — no conversion step and no Python. Each 10-second window is tagged, and the strongest voice, music and noise tags among its top 40 decide that window, as in NightDX. The strongest radio-relevant tags ("Speech", "Radio", "Static", …) are kept with the result and shown on hover. If the model cannot be downloaded or loaded, segments are classified with `dsp` instead and the result says so.
 
 **`dsp`** is a port of NightDX's model-free classifier: spectral flatness, syllabic (2–8 Hz) loudness rhythm and spectral steadiness over 5-second windows, with NightDX's thresholds. Its measurement band is NightDX's 250–3500 Hz capped at the channel's audio passband; without the cap an SSB filter's skirt falls inside the band and makes an empty SSB channel read as music. It is much weaker than the models: data modes such as FT8 read as music, and it was checked on only a handful of SSB recordings.
 
@@ -195,9 +195,9 @@ Runs UberSDR's `whisper-helper` ([`clients/electron/whisper`](https://github.com
 - **Mount it:** build it with UberSDR's `clients/electron/whisper/build.sh` (one static file per platform) and mount it into the container (see `docker-compose.yml`), setting `WHISPER_HELPER` to its path.
 - **Outside Docker:** put it on `PATH` or point `WHISPER_HELPER` at it.
 
-The default image does not include it. If it is missing, transcription reports itself unavailable in the UI rather than failing silently.
+The published image (`madpsy/ubersdr_airsplice`, built by `./docker.sh`) includes it; a plain `docker build` without `WITH_WHISPER=1` does not. If it is missing, transcription reports itself unavailable in the UI rather than failing silently.
 
-The Whisper model and the VAD model are downloaded on first start into `MODEL_DIR`, from Hugging Face URLs pinned to a commit and checked against a pinned size and SHA-256 (the same pins as UberSDR's `models.json`). `base` is about 60 MB, `tiny` 32 MB, `small` 190 MB.
+The Whisper model and the VAD model are downloaded into `MODEL_DIR` when a channel first uses transcription, from Hugging Face URLs pinned to a commit and checked against a pinned size and SHA-256 (the same pins as UberSDR's `models.json`). `base` is about 60 MB, `tiny` 32 MB, `small` 190 MB.
 
 Per channel you choose the **language** (or automatic detection) and whether to **only transcribe segments classified as voice** (which needs classification on for the channel too).
 
@@ -302,10 +302,10 @@ All flags:
 | `-segment-secs` | `300` | WAV segment length in seconds; `0` = continuous |
 | `-cleanup-all-days` | `30` | Delete recordings older than N days; `0` = disabled |
 | `-max-storage-mb` | `20480` | Maximum total storage in MB; `0` = unlimited |
-| `-classify` | `false` | Classify closed segments |
+| `-classify` | `true` | Offer classification to channels |
 | `-classify-model` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` or `dsp` |
 | `-classify-threads` | `1` | CPU threads for the classifier |
-| `-transcribe` | `false` | Transcribe closed segments |
+| `-transcribe` | `true` | Offer transcription to channels |
 | `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
 | `-whisper-model` | `base` | `tiny`, `base` or `small` |
 | `-whisper-threads` | `2` | CPU threads for Whisper |

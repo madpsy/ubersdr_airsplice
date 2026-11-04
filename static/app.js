@@ -341,9 +341,10 @@ function retentionOptionsHTML() {
 // ── Optional analysis: classification / transcription ────────────────────────
 //
 // The host decides whether each feature exists (CLASSIFY / TRANSCRIBE, both
-// off by default; GET /api/analysis). Each channel then opts in from its
-// settings. A feature that is off on the host is shown disabled with the
-// setting that turns it on, and a channel's saved choice is kept untouched.
+// on unless set to false; GET /api/analysis). Each channel then opts in from its
+// settings. Both are on for the host unless turned off there; a feature that
+// is off is shown disabled with the setting responsible, and a channel's saved
+// choice is kept untouched.
 
 let analysisState = {
   classify:   { enabled: false, model: '' },
@@ -352,6 +353,9 @@ let analysisState = {
 let analysisLoaded = false;
 
 // Shown in the language list when the helper has not supplied its own.
+// While a feature is on but no channel has used it yet, its model is not
+// loaded ("idle"); the first opt-in starts the download.
+
 const FALLBACK_LANGS = ['en', 'de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'pl', 'uk', 'ar', 'zh', 'ja', 'ko', 'hi'];
 
 function analysisSignature() {
@@ -407,9 +411,10 @@ function classifyHostError() {
 
 function classifyHostNote() {
   const c = analysisState.classify || {};
-  if (!c.enabled) return 'Off on this host (set CLASSIFY=true to enable)';
+  if (!c.enabled) return 'Turned off on this host (CLASSIFY=false)';
   const name = CLASSIFIER_NAMES[c.model] || c.model;
   switch (c.state) {
+    case 'idle':        return `Classifier: ${name} · loads when a channel uses it`;
     case 'starting':    return `Loading ${name}…`;
     case 'downloading': return `Downloading ${name}… ${Math.round((c.progress || 0) * 100)}%`;
     case 'failed':      return `${name} unavailable, using DSP: ${c.error || 'failed'}`;
@@ -424,8 +429,9 @@ function transcribeHostError() {
 
 function transcribeHostNote() {
   const t = analysisState.transcribe || {};
-  if (!t.enabled) return 'Off on this host (set TRANSCRIBE=true to enable)';
+  if (!t.enabled) return 'Turned off on this host (TRANSCRIBE=false)';
   switch (t.state) {
+    case 'idle':        return `Whisper ${t.model} · loads when a channel uses it`;
     case 'starting':    return 'Starting…';
     case 'downloading': return `Downloading the ${t.model} model… ${Math.round((t.progress || 0) * 100)}%`;
     case 'ready':       return `Whisper ${t.model}` + (t.queued ? ` · ${t.queued} queued` : '');
@@ -444,8 +450,8 @@ function buildAnalysisFields(an) {
     return `
       <div class="an-fields an-off">
         <div class="an-title">Analysis</div>
-        <p class="smart-record-hint">Classification and transcription are off on this host
-          (CLASSIFY / TRANSCRIBE).${kept}</p>
+        <p class="smart-record-hint">Classification and transcription are turned off on this host
+          (CLASSIFY=false, TRANSCRIBE=false).${kept}</p>
       </div>`;
   }
   const langs = (t.languages && t.languages.length) ? t.languages : FALLBACK_LANGS;
@@ -1213,6 +1219,7 @@ function saveSmartRecord(card, label) {
     if (statusEl) { statusEl.textContent = '✓ Saved'; statusEl.className = 'sr-save-status ok'; }
     setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2000);
     loadChannels();
+    loadAnalysis(); // an opt-in may have started a model download
   }).catch(e => {
     if (statusEl) { statusEl.textContent = '✗ ' + e; statusEl.className = 'sr-save-status error'; }
   });
@@ -1449,6 +1456,7 @@ function doAddChannel() {
     errEl.classList.add('hidden');
     hideAddChannelForm();
     loadChannels();
+    loadAnalysis(); // an opt-in may have started a model download
   }).catch(e => {
     errEl.textContent = 'Error: ' + e;
     errEl.classList.remove('hidden');

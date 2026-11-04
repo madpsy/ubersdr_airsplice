@@ -457,6 +457,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusConflict)
 				return
 			}
+			az.use(body.Analysis)
 			mgr.save()
 			hub.broadcast(sseEvent{
 				Event: "channel_added",
@@ -591,6 +592,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 					return
 				}
+				az.use(*body.Analysis)
 				hub.broadcast(sseEvent{
 					Event: "channel_updated",
 					Data:  map[string]interface{}{"label": newLabel, "analysis": *body.Analysis},

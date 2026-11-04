@@ -1,6 +1,6 @@
 // analysis.go — optional post-recording analysis of closed segments.
 //
-// Two features, both off unless the operator turns them on:
+// Two features, offered to every channel and used only by those that opt in:
 //
 //   - Classification (CLASSIFY): is a segment voice, music, voice+music or
 //     noise? Ported from NightDX (github.com/marcozennaro/nightdx, MIT,
@@ -8,11 +8,12 @@
 //   - Transcription (TRANSCRIBE): Whisper, through UberSDR's whisper-helper
 //     (clients/electron/whisper in the server tree) run as a child process.
 //
-// Each needs two switches. The global one (env var / flag) decides whether the
-// host does the work at all: while it is off nothing is loaded, downloaded or
-// started. The per-channel one (AnalysisConfig in channels.json, set in the
-// web UI) decides which channels take part, so turning a feature on for the
-// host does not start transcribing a channel that records around the clock.
+// Each has two switches. The global one (env var / flag, on unless set to
+// false) decides whether the host offers the feature at all. The per-channel
+// one (AnalysisConfig in channels.json, set in the web UI, off for a new
+// channel) decides which channels take part, so nothing is analysed until a
+// channel opts in. A model is downloaded and loaded only when the first
+// channel needs it (use): a host whose channels never opt in fetches nothing.
 // The model is chosen once for the host: one model loaded, and results that
 // mean the same thing on every channel.
 //
@@ -236,6 +237,8 @@ type analyzer struct {
 	whisper     *whisperRunner // nil unless TRANSCRIBE is on
 	eat         *eatRunner     // nil unless CLASSIFY is on with an EfficientAT model
 
+	ctx context.Context // set by start; models are prepared under it
+
 	// channelLookup returns a channel's current opt-in and filter bandwidth,
 	// for segments re-queued after a restart (a segment does not record them).
 	channelLookup func(channelID string) (AnalysisConfig, int, bool)
@@ -269,16 +272,14 @@ func (a *analyzer) start(ctx context.Context) {
 	if !a.enabled() {
 		return
 	}
+	a.ctx = ctx
+	// Models are downloaded and loaded only once a channel uses them (use).
 	if a.settings.Classify {
-		log.Printf("[analysis] classification enabled (model %s)", a.settings.ClassifyModel)
-		if a.eat != nil {
-			go a.eat.prepare(ctx)
-		}
+		log.Printf("[analysis] classification available (model %s, loaded when a channel opts in)", a.settings.ClassifyModel)
 	}
 	if a.whisper != nil {
-		log.Printf("[analysis] transcription enabled (model %s, %d threads, %.1fx real time)",
+		log.Printf("[analysis] transcription available (model %s, %d threads, %.1fx real time, loaded when a channel opts in)",
 			a.settings.WhisperModel, a.settings.WhisperThreads, a.settings.WhisperSpeed)
-		go a.whisper.prepare(ctx)
 	}
 	go a.classifyWorkerCtx(ctx)
 	go a.transcribeWorker(ctx)
@@ -290,6 +291,26 @@ func (a *analyzer) start(ctx context.Context) {
 			a.whisper.shutdown()
 		}
 	}()
+}
+
+// use prepares the models a channel's opt-in needs: called when channels are
+// loaded, when a channel is added or its analysis settings change, and when
+// work is queued. Each model is prepared once; a host whose channels never opt
+// in downloads and loads nothing.
+func (a *analyzer) use(cfg AnalysisConfig) {
+	if a == nil {
+		return
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cfg.Classify && a.settings.Classify && a.eat != nil {
+		a.eat.begin(ctx)
+	}
+	if cfg.Transcribe && a.settings.Transcribe && a.whisper != nil {
+		a.whisper.begin(ctx)
+	}
 }
 
 // enqueue is called when a segment closes. cfg is the channel's opt-in at that
@@ -318,6 +339,7 @@ func (a *analyzer) enqueue(rec *recordingRecord, cfg AnalysisConfig, bwHz int) {
 		a.markSkipped(j, fmt.Sprintf("shorter than %.0f s", minAnalysisSec))
 		return
 	}
+	a.use(AnalysisConfig{Classify: j.classify, Transcribe: j.transcribe})
 	a.update(j.recID, func(an *segmentAnalysis) {
 		if j.classify {
 			an.Classification = &classificationResult{Status: analysisPending, At: now}
@@ -371,6 +393,7 @@ func (a *analyzer) requeuePending() {
 			a.markSkipped(j, "feature disabled")
 			continue
 		}
+		a.use(AnalysisConfig{Classify: j.classify, Transcribe: j.transcribe})
 		a.classifyQ.push(j)
 	}
 	if len(jobs) > 0 {

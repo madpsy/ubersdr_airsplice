@@ -369,7 +369,16 @@ func TestChannelConfigAnalysisRoundTrip(t *testing.T) {
 
 func newTestStore(t *testing.T) *recordingStore {
 	t.Helper()
-	return newRecordingStore(t.TempDir(), newSSEHub())
+	s := newRecordingStore(t.TempDir(), newSSEHub())
+	// The store updates a record in memory before writing its sidecars, so a
+	// test that saw the final status can end while the write is still going.
+	// Wait for it (cleanups run last-registered first, so before TempDir's
+	// RemoveAll), or the removal races the write.
+	t.Cleanup(func() {
+		s.sidecarMu.Lock()
+		s.sidecarMu.Unlock()
+	})
+	return s
 }
 
 func addTestSegment(t *testing.T, s *recordingStore, x []float32, rate int, snr float32) *recordingRecord {
@@ -592,6 +601,7 @@ func readyRunner(t *testing.T, s analysisSettings) *whisperRunner {
 	w := newWhisperRunner(s)
 	w.helperPath, w.modelPath, w.vadPath = s.WhisperHelper, "model.bin", "vad.bin"
 	w.state = "ready"
+	w.once.Do(func() {}) // already prepared: begin must not run prepare
 	close(w.readyCh)
 	t.Cleanup(w.shutdown)
 	return w
@@ -642,7 +652,8 @@ func TestWhisperHelperCrashFailsAndRestarts(t *testing.T) {
 
 func TestWhisperUnavailableWithoutHelper(t *testing.T) {
 	w := newWhisperRunner(analysisSettings{Transcribe: true, WhisperHelper: "/nonexistent/whisper-helper", WhisperModel: "tiny", ModelDir: t.TempDir()})
-	w.prepare(context.Background())
+	w.begin(context.Background())
+	<-w.readyCh
 	st := w.status()
 	if st["state"] != "unavailable" || !strings.Contains(st["error"].(string), "WHISPER_HELPER") {
 		t.Fatalf("%v", st)
@@ -716,5 +727,44 @@ func TestRequeuePendingUsesChannelConfig(t *testing.T) {
 	})
 	if tr := analysisOf(s, r.ID).Transcript; tr.Status != analysisSkipped || tr.Reason != "no voice detected" {
 		t.Fatalf("%+v", tr)
+	}
+}
+
+// Models are prepared only when a channel needs them: a host whose channels
+// never opt in downloads and loads nothing.
+func TestModelsLoadOnlyWhenAChannelOptsIn(t *testing.T) {
+	s := newTestStore(t)
+	set := analysisSettings{Classify: true, ClassifyModel: "mn10", ClassifyThreads: 1,
+		Transcribe: true, WhisperHelper: "/nonexistent/whisper-helper", WhisperModel: "tiny",
+		WhisperThreads: 1, WhisperSpeed: 1, ModelDir: t.TempDir()}
+	az := newAnalyzer(set, s, s.hub)
+	az.eat.pin.URL = "http://127.0.0.1:1/never-fetched.pt" // fail fast, never the network
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	az.start(ctx)
+
+	state := func(m map[string]interface{}) string { return m["state"].(string) }
+	az.use(AnalysisConfig{}) // a channel with nothing opted in
+	time.Sleep(50 * time.Millisecond)
+	if state(az.eat.status()) != "idle" || state(az.whisper.status()) != "idle" {
+		t.Fatalf("models prepared with no channel opted in: %v %v", az.eat.status(), az.whisper.status())
+	}
+
+	az.use(AnalysisConfig{Transcribe: true}) // transcription only
+	waitFor(t, "whisper prepare", func() bool { return state(az.whisper.status()) != "idle" && state(az.whisper.status()) != "starting" })
+	if st := state(az.whisper.status()); st != "unavailable" {
+		t.Fatalf("whisper state %s", st)
+	}
+	if state(az.eat.status()) != "idle" {
+		t.Fatal("the classifier was prepared for a transcription-only opt-in")
+	}
+
+	az.use(AnalysisConfig{Classify: true})
+	waitFor(t, "classifier prepare", func() bool {
+		st := state(az.eat.status())
+		return st == "failed" || st == "ready"
+	})
+	if snap := az.statusSnapshot()["classify"].(map[string]interface{}); snap["state"] != "failed" {
+		t.Fatalf("classify status %v", snap)
 	}
 }

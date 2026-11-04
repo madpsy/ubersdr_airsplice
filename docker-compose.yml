@@ -20,12 +20,13 @@ services:
       # CLEANUP_ALL_DAYS: "30"   # Delete ALL recordings older than N days (0=disabled)
       MAX_STORAGE_MB: "20480"    # Maximum total storage in MB (20 GB); 0 = unlimited. Per-channel limits set via web UI.
       #
-      # Optional analysis — both off by default; each channel also opts in from the web UI.
-      # CLASSIFY: "true"         # voice / music / noise label per segment
+      # Optional analysis — offered to channels unless turned off here; each channel
+      # opts in from the web UI, and models are downloaded only when one does.
+      # CLASSIFY: "false"        # turn off voice / music / noise labels for this host
       # CLASSIFY_MODEL: "mn10"   # mn05 | mn10 | mn20 (EfficientAT, downloaded to /data/models) | dsp
-      # TRANSCRIBE: "true"       # Whisper transcripts; needs UberSDR's whisper-helper:
-      # WHISPER_HELPER: "/opt/whisper/whisper-helper"   # e.g. mounted below
-      # WHISPER_MODEL: "base"    # tiny | base | small (downloaded to /data/models on first start)
+      # TRANSCRIBE: "false"      # turn off Whisper transcripts for this host
+      # WHISPER_HELPER: "/opt/whisper/whisper-helper"   # included in the published image
+      # WHISPER_MODEL: "base"    # tiny | base | small (downloaded to /data/models on first use)
       # WHISPER_THREADS: "2"
     networks:
       - sdr-network

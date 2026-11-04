@@ -119,7 +119,8 @@ type whisperRunner struct {
 	settings analysisSettings
 
 	mu        sync.Mutex
-	state     string // starting | downloading | ready | unavailable | failed
+	state     string // idle | starting | downloading | ready | unavailable | failed
+	once      sync.Once
 	errMsg    string
 	progress  float64 // download progress 0..1
 	languages []string
@@ -137,7 +138,13 @@ type whisperRunner struct {
 }
 
 func newWhisperRunner(s analysisSettings) *whisperRunner {
-	return &whisperRunner{settings: s, state: "starting", readyCh: make(chan struct{})}
+	return &whisperRunner{settings: s, state: "idle", readyCh: make(chan struct{})}
+}
+
+// begin starts prepare the first time something needs transcription: a
+// channel opting in, or a segment queued. Until then nothing is downloaded.
+func (w *whisperRunner) begin(ctx context.Context) {
+	w.once.Do(func() { go w.prepare(ctx) })
 }
 
 func (w *whisperRunner) setState(state, msg string) {
@@ -171,6 +178,9 @@ func (w *whisperRunner) status() map[string]interface{} {
 // once at startup, in the background; transcription waits for it.
 func (w *whisperRunner) prepare(ctx context.Context) {
 	defer close(w.readyCh)
+	w.mu.Lock()
+	w.state = "starting"
+	w.mu.Unlock()
 	path, err := exec.LookPath(w.settings.WhisperHelper)
 	if err != nil {
 		w.setState("unavailable", fmt.Sprintf("whisper-helper not found (%q); set WHISPER_HELPER to its path", w.settings.WhisperHelper))
@@ -399,6 +409,7 @@ func (w *whisperRunner) transcribe(ctx context.Context, j analysisJob) *transcri
 		res.Status, res.Reason, res.At = status, reason, time.Now().UTC()
 		return res
 	}
+	w.begin(ctx)
 	select {
 	case <-w.readyCh:
 	case <-ctx.Done():

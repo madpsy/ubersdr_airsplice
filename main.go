@@ -498,14 +498,14 @@ func main() {
 
 		// Optional analysis (analysis.go). Off by default; each channel also
 		// opts in from the web UI.
-		classify = flag.Bool("classify", envBoolOr("CLASSIFY", false),
-			"Classify closed segments as voice/music/noise (env: CLASSIFY)")
+		classify = flag.Bool("classify", envBoolOr("CLASSIFY", true),
+			"Offer voice/music/noise classification to channels; false turns it off for the host (env: CLASSIFY)")
 		classifyModel = flag.String("classify-model", envOr("CLASSIFY_MODEL", "mn10"),
 			"Classifier: "+strings.Join(classifyModels, ", ")+" (env: CLASSIFY_MODEL)")
 		classifyThreads = flag.Int("classify-threads", envIntOr("CLASSIFY_THREADS", 1),
 			"CPU threads for the classifier (env: CLASSIFY_THREADS)")
-		transcribe = flag.Bool("transcribe", envBoolOr("TRANSCRIBE", false),
-			"Transcribe closed segments with Whisper (env: TRANSCRIBE)")
+		transcribe = flag.Bool("transcribe", envBoolOr("TRANSCRIBE", true),
+			"Offer Whisper transcription to channels; false turns it off for the host (env: TRANSCRIBE)")
 		whisperHelper = flag.String("whisper-helper", envOr("WHISPER_HELPER", "whisper-helper"),
 			"Path to UberSDR's whisper-helper binary (env: WHISPER_HELPER)")
 		whisperModel = flag.String("whisper-model", envOr("WHISPER_MODEL", "base"),
@@ -586,6 +586,9 @@ func main() {
 
 	// Segments a restart left pending, now that their channels are known.
 	az.channelLookup = mgr.analysisFor
+	for _, ch := range mgr.list() {
+		az.use(ch.getAnalysis()) // prepare the models the channels use
+	}
 	az.requeuePending()
 
 	// Start HTTP server in background.
