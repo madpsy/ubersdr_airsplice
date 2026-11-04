@@ -15,7 +15,10 @@ ARG WITH_WHISPER=0
 FROM debian:bookworm-slim AS whisper-0
 RUN mkdir -p /out
 
-FROM debian:trixie AS whisper-1
+# Built on the build machine's own platform and cross-compiled for the target,
+# as UberSDR's build does: compiling whisper.cpp under emulation for arm64
+# would take far longer.
+FROM --platform=$BUILDPLATFORM debian:trixie AS whisper-1
 ARG UBERSDR_REPO=https://github.com/madpsy/ka9q_ubersdr
 ARG UBERSDR_COMMIT=a7d99bdfb94823988009314e4234c8b74307c5ec
 ARG WHISPER_CPP_REPO=https://github.com/ggml-org/whisper.cpp
@@ -23,9 +26,14 @@ ARG WHISPER_CPP_COMMIT=0c7be696371069e0baa2515ed7aa08d5a5473aa6
 # Parallel compile jobs; lower it on a busy build host.
 ARG BUILD_JOBS=4
 ARG TARGETARCH
+ARG BUILDARCH
 RUN apt-get update -qq \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
       cmake make gcc g++ git ca-certificates \
+ && if [ "$TARGETARCH" = arm64 ] && [ "$BUILDARCH" != arm64 ]; then \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; \
+    fi \
  && rm -rf /var/lib/apt/lists/*
 # Fetch only the helper's directory, and whisper.cpp, each by commit hash.
 RUN git init -q /w && cd /w \
@@ -37,9 +45,16 @@ RUN git init -q /w && cd /w \
  && git fetch -q --depth 1 "$WHISPER_CPP_REPO" "$WHISPER_CPP_COMMIT" \
  && git checkout -q FETCH_HEAD
 RUN set -e; H=/w/clients/electron/whisper; mkdir -p /out; \
+    STRIP=strip; CROSS=""; \
+    if [ "$TARGETARCH" = arm64 ] && [ "$BUILDARCH" != arm64 ]; then \
+      CROSS="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++"; \
+      STRIP=aarch64-linux-gnu-strip; \
+    elif [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      echo "whisper-helper: no cross build from $BUILDARCH to $TARGETARCH" >&2; exit 1; \
+    fi; \
     build() { \
       cmake -S "$H" -B "/b/$1" -DCMAKE_BUILD_TYPE=Release -DWHISPER_CPP_DIR=/wcpp \
-        -DWHISPER_CPP_COMMIT="$WHISPER_CPP_COMMIT" -DWHISPER_HELPER_VARIANT="$1" $2 >/dev/null; \
+        -DWHISPER_CPP_COMMIT="$WHISPER_CPP_COMMIT" -DWHISPER_HELPER_VARIANT="$1" $CROSS $2 >/dev/null; \
       cmake --build "/b/$1" --target whisper-helper -j"$BUILD_JOBS" >/dev/null; \
     }; \
     case "$TARGETARCH" in \
@@ -53,7 +68,8 @@ RUN set -e; H=/w/clients/electron/whisper; mkdir -p /out; \
         cp /b/baseline/whisper-helper /out/whisper-helper ;; \
       *) echo "whisper-helper: no build for $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    strip --strip-unneeded /out/*; /out/whisper-helper --version
+    $STRIP --strip-unneeded /out/*; \
+    if [ -z "$CROSS" ]; then /out/whisper-helper --version; fi
 
 FROM whisper-${WITH_WHISPER} AS whisper
 

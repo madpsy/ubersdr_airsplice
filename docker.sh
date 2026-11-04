@@ -13,9 +13,11 @@
 #   run    — run the image locally (set env vars below)
 #
 # Environment variables (build):
-#   IMAGE      Docker image name/tag   (default: madpsy/ubersdr_airsplice:latest)
-#   PLATFORM   Docker --platform flag  (default: linux/amd64)
-#   BUILDER    buildx builder name     (default: ubersdr-multiarch)
+#   IMAGE         Docker image name/tag   (default: madpsy/ubersdr_airsplice:latest)
+#   PLATFORM      Docker --platform flag  (default: linux/amd64)
+#   BUILDER       buildx builder name     (default: ubersdr-multiarch)
+#   WITH_WHISPER  include UberSDR's whisper-helper for TRANSCRIBE (default: 1)
+#   BUILD_JOBS    parallel jobs compiling it (default: 4)
 
 set -euo pipefail
 
@@ -24,6 +26,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${IMAGE:-madpsy/ubersdr_airsplice:latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 BUILDER="${BUILDER:-ubersdr-multiarch}"
+# Release images carry whisper-helper; a plain `docker build` does not.
+WITH_WHISPER="${WITH_WHISPER:-1}"
+BUILD_JOBS="${BUILD_JOBS:-4}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,6 +74,8 @@ build() {
     echo "Building image $IMAGE (platform=$PLATFORM)..."
     docker build \
         --platform "$PLATFORM" \
+        --build-arg WITH_WHISPER="$WITH_WHISPER" \
+        --build-arg BUILD_JOBS="$BUILD_JOBS" \
         --tag "$IMAGE" \
         "$TMPCTX"
 
@@ -85,6 +92,8 @@ push() {
     docker buildx build \
         --builder "$BUILDER" \
         --platform "$platforms" \
+        --build-arg WITH_WHISPER="$WITH_WHISPER" \
+        --build-arg BUILD_JOBS="$BUILD_JOBS" \
         --tag "$IMAGE" \
         --push \
         "$TMPCTX"
