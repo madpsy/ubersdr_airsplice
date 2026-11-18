@@ -250,15 +250,13 @@ func (r *signalResult) runs() []signalRun {
 }
 
 // counts are the segment's entries in a recording's summary (Segments unset):
-// every signal or family any of its minutes identified, once each.
+// every signal or family any of its minutes identified, once each, the one the
+// segment is called after first.
 func (r *signalResult) counts() []signalCount {
 	if r == nil {
 		return nil
 	}
-	runs := r.Runs
-	if len(runs) == 0 {
-		runs = []signalRun{r.asRun()}
-	}
+	runs := append([]signalRun{r.asRun()}, r.Runs...)
 	var out []signalCount
 	seen := map[signalCount]bool{}
 	for _, run := range runs {
@@ -419,6 +417,65 @@ func (a *signalAccum) result() *signalResult {
 		res.Top = append(res.Top, signalScore{h.Signals[i].Name, round3(p[i])})
 	}
 	return res
+}
+
+// applySignal folds the identification into the classification, as UberSDR's
+// badge ranks them: a named signal (or family) first, voice / music / noise
+// only where nothing was. Each classification window (windowSec long) that
+// falls in a minute that named something becomes "signal"; the shares are
+// recomputed with SignalPct; a segment that is at least half signal is
+// labelled "signal" (its Signal says which), and otherwise is labelled from
+// its other windows by foldWindows's rule.
+func applySignal(res *classificationResult, windowSec float64) {
+	sig := res.Signal
+	if res.Status != analysisDone || !sig.anyIdentified() || len(res.Windows) == 0 {
+		return
+	}
+	named := func(say string) bool { return say == "name" || say == "family" }
+	// in reports whether the window centred at t lies in an identified minute:
+	// each run reaches from its start to the next one's; the first also covers
+	// whatever came before it (silence, skipped).
+	in := func(t float64) bool {
+		if len(sig.Runs) == 0 {
+			return named(sig.Say)
+		}
+		k := 0
+		for i, r := range sig.Runs {
+			if r.StartSec <= t {
+				k = i
+			}
+		}
+		return named(sig.Runs[k].Say)
+	}
+	var rest []string
+	n := 0
+	for i := range res.Windows {
+		if in((float64(i) + 0.5) * windowSec) {
+			res.Windows[i] = "signal"
+			n++
+		} else {
+			rest = append(rest, res.Windows[i])
+		}
+	}
+	if n == 0 {
+		return
+	}
+	total := float64(len(res.Windows))
+	share := func(x float64) float64 { return math.Round(x*10) / 10 }
+	res.SignalPct = share(100 * float64(n) / total)
+	if len(rest) == 0 {
+		res.Label = "signal"
+		res.VoicePct, res.MusicPct, res.NoisePct = 0, 0, 0
+		return
+	}
+	f := foldWindows(rest, "", 0)
+	k := float64(len(rest)) / total
+	res.VoicePct, res.MusicPct, res.NoisePct = share(f.VoicePct*k), share(f.MusicPct*k), share(f.NoisePct*k)
+	if res.SignalPct >= 50 {
+		res.Label = "signal"
+	} else {
+		res.Label = f.Label
+	}
 }
 
 // identifyFrom names the signal in a stream already at 32 kHz: 5 s windows

@@ -1143,6 +1143,10 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
 .an-music       { background: #24163a; color: #c4a1f7; border-color: #8b6bd1; }
 .an-voice-music { background: #102434; color: #7dd3fc; border-color: #38bdf8; }
 .an-noise       { background: #1e2030; color: var(--muted); }
+/* a label that is an identified signal: as its chip (.an-sig) */
+.an-signal      { background: #16203a; color: #93b4f5; border-color: var(--accent); }
+.an-signal.an-signal-sure { background: #0f2a1a; color: var(--accent2); border-color: var(--accent2); }
+.an-signal.an-signal-family { border-style: dashed; }
 .an-pending     { color: #f5c542; border-color: #5a4a14; }
 .an-failed      { color: var(--danger); border-color: #5a2424; }
 .an-skipped     { color: var(--muted); }
@@ -1203,6 +1207,7 @@ button.an-label:hover { filter: brightness(1.25); }
 .an-strip i.an-music,       .sa-bar i.an-music,       .sa-dot.an-music       { background: #a78bfa; }
 .an-strip i.an-voice-music,                            .sa-dot.an-voice-music { background: #38bdf8; }
 .an-strip i.an-noise,       .sa-bar i.an-noise,       .sa-dot.an-noise       { background: #3a3f52; }
+.an-strip i.an-signal,      .sa-bar i.an-signal,      .sa-dot.an-signal      { background: var(--accent); }
 .an-strip-wide { width: 100%; max-width: 640px; height: 12px; }
 
 .an-tag {

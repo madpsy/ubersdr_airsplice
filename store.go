@@ -109,6 +109,13 @@ func (s *recordingStore) loadExisting() {
 			continue
 		}
 		rec.SNR.Sanitise()
+		// Segments identified before the identification outranked the
+		// tagger's label (FT8 labelled music): label them as now.
+		if an := rec.Analysis; an != nil && an.Classification != nil {
+			if c := an.Classification; c.SignalPct == 0 && c.Signal.anyIdentified() && !strings.HasPrefix(c.Backend, "dsp") {
+				applySignal(c, eatWindow)
+			}
+		}
 		if _, wasDel := s.deleted[rec.ID]; wasDel {
 			continue
 		}
@@ -703,6 +710,7 @@ type lastHeard struct {
 	StartedAt   time.Time     `json:"started_at"`
 	DurationSec float64       `json:"duration_sec"`
 	Label       string        `json:"label"`
+	SignalPct   float64       `json:"signal_pct,omitempty"`
 	VoicePct    float64       `json:"voice_pct"`
 	MusicPct    float64       `json:"music_pct"`
 	NoisePct    float64       `json:"noise_pct"`
@@ -734,7 +742,7 @@ func (s *recordingStore) latestHeard(channelID string) *lastHeard {
 	}
 	c := best.Analysis.Classification
 	lh := &lastHeard{SegmentID: best.ID, StartedAt: best.StartedAt, DurationSec: best.DurationSec,
-		Label: c.Label, VoicePct: c.VoicePct, MusicPct: c.MusicPct, NoisePct: c.NoisePct, Tags: c.Tags}
+		Label: c.Label, SignalPct: c.SignalPct, VoicePct: c.VoicePct, MusicPct: c.MusicPct, NoisePct: c.NoisePct, Tags: c.Tags}
 	if c.Signal.anyIdentified() {
 		lh.Signal = c.Signal
 	}

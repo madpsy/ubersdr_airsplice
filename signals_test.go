@@ -370,3 +370,65 @@ func identifyMixed(t *testing.T, m *eatModel, ref *signalRefs, dir string) {
 		t.Fatalf("counts %v, want CW and FT8", c)
 	}
 }
+
+// An identified signal outranks the tagger's label (FT8 heard as music), as
+// UberSDR's badge ranks them; a segment only partly signal keeps the rest's.
+func TestApplySignal(t *testing.T) {
+	ft8 := &signalResult{Say: "name", Name: "FT8", Short: "FT8", P: 0.9, Windows: 120}
+	// Five minutes of FT8, every 10 s window heard as music.
+	c := foldWindows(make([]string, 30), "mn10", 0.5)
+	for i := range c.Windows {
+		c.Windows[i] = "music"
+	}
+	c = foldWindows(c.Windows, "mn10", 0.5)
+	c.Signal = ft8
+	applySignal(c, eatWindow)
+	if c.Label != "signal" || c.SignalPct != 100 || c.MusicPct != 0 || c.Windows[0] != "signal" {
+		t.Fatalf("all FT8: label %s, signal %.0f%%, music %.0f%%", c.Label, c.SignalPct, c.MusicPct)
+	}
+
+	// Three minutes: FT8, then two of voice; the voice minutes name nothing.
+	w := make([]string, 18)
+	for i := range w {
+		w[i] = "voice"
+		if i < 6 {
+			w[i] = "music"
+		}
+	}
+	c = foldWindows(w, "mn10", 0.5)
+	c.Signal = &signalResult{Say: "name", Name: "FT8", Short: "FT8", P: 0.9, Windows: 72, Runs: []signalRun{
+		{StartSec: 0, Say: "name", Name: "FT8", Short: "FT8"},
+		{StartSec: 60, Say: "voice"},
+		{StartSec: 120, Say: "nothing"},
+	}}
+	applySignal(c, eatWindow)
+	if c.Label != "voice" || math.Round(c.SignalPct) != 33 || math.Round(c.VoicePct) != 67 || c.MusicPct != 0 {
+		t.Fatalf("FT8 then voice: label %s, signal %.1f%%, voice %.1f%%, music %.1f%%", c.Label, c.SignalPct, c.VoicePct, c.MusicPct)
+	}
+	if c.Windows[5] != "signal" || c.Windows[6] != "voice" {
+		t.Fatalf("windows %v", c.Windows)
+	}
+
+	// Nothing identified: unchanged.
+	c = foldWindows([]string{"music", "music"}, "mn10", 0.5)
+	c.Signal = &signalResult{Say: "nothing", Windows: 8}
+	applySignal(c, eatWindow)
+	if c.Label != "music" || c.SignalPct != 0 {
+		t.Fatalf("unidentified: label %s", c.Label)
+	}
+
+	// The recording's summary: mostly signal is "signal", and the tagger's
+	// tags from signal segments are not counted.
+	sig := foldWindows([]string{"music"}, "mn10", 0.5)
+	sig.Signal, sig.Tags = ft8, []string{"Beep, bleep"}
+	applySignal(sig, eatWindow)
+	voice := foldWindows([]string{"voice"}, "mn10", 0.5)
+	voice.Tags = []string{"Speech"}
+	rec := func(c *classificationResult, d float64) *recordingRecord {
+		return &recordingRecord{DurationSec: d, Analysis: &segmentAnalysis{Classification: c}}
+	}
+	sa := summarizeAnalysis([]*recordingRecord{rec(sig, 300), rec(voice, 100)})
+	if sa.Label != "signal" || sa.SignalPct != 75 || len(sa.Tags) != 1 || sa.Tags[0].Tag != "Speech" {
+		t.Fatalf("summary: label %s, signal %.0f%%, tags %v", sa.Label, sa.SignalPct, sa.Tags)
+	}
+}

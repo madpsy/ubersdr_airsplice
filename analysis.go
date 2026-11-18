@@ -124,7 +124,8 @@ type segmentAnalysis struct {
 
 type classificationResult struct {
 	Status     string   `json:"status"`
-	Label      string   `json:"label,omitempty"` // voice | music | voice+music | noise
+	Label      string   `json:"label,omitempty"`      // voice | music | voice+music | noise | signal (see Signal)
+	SignalPct  float64  `json:"signal_pct,omitempty"` // windows in minutes identified as a signal (applySignal)
 	VoicePct   float64  `json:"voice_pct"`
 	MusicPct   float64  `json:"music_pct"`
 	NoisePct   float64  `json:"noise_pct"`
@@ -517,6 +518,10 @@ func (a *analyzer) runClassify(ctx context.Context, j analysisJob) *classificati
 			res.Windows[i] = "noise"
 		}
 	}
+	// A signal the identifier named outranks what the tagger heard in it
+	// (AudioSet hears FT8 as music, CW as a beep), and the SNR rule too: it
+	// was positively recognised.
+	applySignal(res, eatWindow)
 	return res
 }
 
@@ -669,7 +674,8 @@ func shortID(id string) string {
 // sessionAnalysis summarises the analysis of a recording's segments: what the
 // recording as a whole (or so far) contains.
 type sessionAnalysis struct {
-	Label         string     `json:"label,omitempty"` // voice | music | voice+music | noise, time-weighted
+	Label         string     `json:"label,omitempty"`      // voice | music | voice+music | noise | signal, time-weighted
+	SignalPct     float64    `json:"signal_pct,omitempty"` // identified as a signal (Signals says which)
 	VoicePct      float64    `json:"voice_pct"`
 	MusicPct      float64    `json:"music_pct"`
 	NoisePct      float64    `json:"noise_pct"`
@@ -707,7 +713,8 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 	seen := false
 	tags := map[string]int{}
 	sigs := map[signalCount]int{}
-	var v, m, z float64
+	heads := map[signalCount]int{} // segments called after it
+	var v, m, z, sg float64
 	for _, r := range segs {
 		an := r.Analysis
 		if an == nil {
@@ -737,11 +744,19 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 				v += d * c.VoicePct
 				m += d * c.MusicPct
 				z += d * c.NoisePct
-				for _, t := range c.Tags {
-					tags[t]++
+				sg += d * c.SignalPct
+				// What AudioSet heard in a signal (FT8 as music, CW as a
+				// beep) is not what is there: only other segments' tags count.
+				if c.Label != "signal" {
+					for _, t := range c.Tags {
+						tags[t]++
+					}
 				}
-				for _, k := range c.Signal.counts() {
+				for i, k := range c.Signal.counts() {
 					sigs[k]++
+					if i == 0 && c.Signal.identified() {
+						heads[k]++
+					}
 				}
 			} else {
 				count(c.Status)
@@ -766,10 +781,22 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 		sa.VoicePct = math.Round(v/sa.ClassifiedSec*10) / 10
 		sa.MusicPct = math.Round(m/sa.ClassifiedSec*10) / 10
 		sa.NoisePct = math.Round(z/sa.ClassifiedSec*10) / 10
+		sa.SignalPct = math.Round(sg/sa.ClassifiedSec*10) / 10
+		// As for a segment (applySignal): mostly signal is "signal"; else the
+		// rest is labelled by foldWindows's rule, on its own shares.
+		rest := 100 - sa.SignalPct
+		of := func(x float64) float64 {
+			if rest <= 0 {
+				return 0
+			}
+			return 100 * x / rest
+		}
 		switch {
-		case sa.NoisePct >= 60:
+		case sa.SignalPct >= 50:
+			sa.Label = "signal"
+		case of(sa.NoisePct) >= 60:
 			sa.Label = "noise"
-		case sa.VoicePct >= 25 && sa.MusicPct >= 25:
+		case of(sa.VoicePct) >= 25 && of(sa.MusicPct) >= 25:
 			sa.Label = "voice+music"
 		case sa.VoicePct >= sa.MusicPct:
 			sa.Label = "voice"
@@ -784,10 +811,14 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 		k.Segments = n
 		sa.Signals = append(sa.Signals, k)
 	}
+	head := func(k signalCount) int { k.Segments = 0; return heads[k] }
 	sort.Slice(sa.Signals, func(i, j int) bool {
 		a, b := sa.Signals[i], sa.Signals[j]
 		if a.Segments != b.Segments {
 			return a.Segments > b.Segments
+		}
+		if ha, hb := head(a), head(b); ha != hb {
+			return ha > hb // the one segments were called after
 		}
 		if a.Family != b.Family {
 			return !a.Family // names before families

@@ -555,7 +555,30 @@ function channelAnalysisBadges(ch) {
   return out;
 }
 
-const AN_LABELS = { voice: 'Voice', music: 'Music', 'voice+music': 'Voice + music', noise: 'Noise' };
+const AN_LABELS = { voice: 'Voice', music: 'Music', 'voice+music': 'Voice + music', noise: 'Noise', signal: 'Signal' };
+
+// The label's text. A segment labelled "signal" is named as UberSDR's badge
+// names it: the signal ("FT8"), or its family ("FSK") when unsure which; the
+// tagger's voice / music / noise only where no signal was identified (it
+// hears FT8 as music and CW as a beep).
+function labelText(c) {
+  if (c && c.label === 'signal') {
+    const sig = c.signal;
+    if (sig && sig.say === 'name') return sig.short;
+    if (sig && sig.say === 'family') return sig.family_text;
+    const first = segmentSignals(sig)[0];
+    if (first) return first.signal;
+  }
+  return AN_LABELS[c && c.label] || (c && c.label) || '';
+}
+
+// Whether the label is a signal's, and sure (UberSDR's badge goes green over 90%).
+function labelClass(c) {
+  if (!c || c.label !== 'signal') return `an-${AN_KEY(c && c.label)}`;
+  const sig = c.signal;
+  return 'an-signal' + (sig && sig.say === 'name' && sig.p > 0.9 ? ' an-signal-sure' : '')
+    + (sig && sig.say === 'family' ? ' an-signal-family' : '');
+}
 const AN_KEY = l => (l || 'noise').replace('+', '-');
 const CLASSIFIER_WINDOW_SEC = backend => (backend || '').startsWith('dsp') ? 5 : 10;
 
@@ -565,6 +588,7 @@ function labelShare(c) {
     case 'voice': return c.voice_pct;
     case 'music': return c.music_pct;
     case 'noise': return c.noise_pct;
+    case 'signal': return c.signal_pct;
     default:      return (c.voice_pct || 0) + (c.music_pct || 0);
   }
 }
@@ -585,9 +609,10 @@ function segAnalysisHTML(seg) {
   if (c) {
     if (c.status === 'done') {
       const share = Math.round(labelShare(c) || 0);
-      out += `<button class="an-label an-${AN_KEY(c.label)}" onclick="toggleSegDetail(this)" title="Show what was heard">${escHtml(AN_LABELS[c.label] || c.label)} ${share}%</button>`;
+      out += `<button class="an-label ${labelClass(c)}" onclick="toggleSegDetail(this)" title="Show what was heard">${escHtml(labelText(c))} ${share}%</button>`;
       out += windowStripHTML(c.windows);
-      out += signalChipHTML(c.signal) + otherSignalChipsHTML(c.signal);
+      // The label is the signal itself when it is "signal"; else show it beside.
+      out += (c.label === 'signal' ? '' : signalChipHTML(c.signal)) + otherSignalChipsHTML(c.signal);
     } else if (c.status === 'pending') {
       out += `<span class="an-label an-pending" title="Classification queued">Classifying…</span>`;
     } else {
@@ -607,7 +632,8 @@ function segAnalysisHTML(seg) {
     }
   }
   // Tags last, so if the row is too narrow it is they that wrap, not the buttons.
-  if (c && c.status === 'done' && c.tags && c.tags.length) {
+  // Not for a signal: what AudioSet heard in FT8 ("Music", "Beep") misleads.
+  if (c && c.status === 'done' && c.label !== 'signal' && c.tags && c.tags.length) {
     out += `<span class="seg-tags">${tagChipsHTML(c.tags, 3)}</span>`;
   }
   return out;
@@ -621,13 +647,17 @@ function segDetailHTML(seg) {
   if (c && c.status === 'done') {
     const pct = v => Math.round(v || 0);
     const n = (c.windows || []).length, w = CLASSIFIER_WINDOW_SEC(c.backend);
-    parts.push(`<div class="an-detail-line"><b>${escHtml(AN_LABELS[c.label] || c.label)}</b> — voice ${pct(c.voice_pct)}% · music ${pct(c.music_pct)}% · noise ${pct(c.noise_pct)}%
+    const shares = (c.signal_pct ? [`signal ${pct(c.signal_pct)}%`] : [])
+      .concat([`voice ${pct(c.voice_pct)}%`, `music ${pct(c.music_pct)}%`, `noise ${pct(c.noise_pct)}%`]).join(' · ');
+    parts.push(`<div class="an-detail-line"><b>${escHtml(labelText(c))}</b> — ${shares}
       <span class="an-muted">(${n} window${n !== 1 ? 's' : ''} of ${w} s · ${escHtml(CLASSIFIER_NAMES[(c.backend || '').split('+')[0]] || c.backend || '')}${(c.backend || '').endsWith('+snr') ? ' · low SNR, counted as noise' : ''})</span></div>`);
     if (c.windows && c.windows.length) parts.push(`<div class="an-detail-line">${windowStripHTML(c.windows, 'an-strip-wide')}</div>`);
-    if (c.tags && c.tags.length) {
-      parts.push(`<div class="an-detail-line">Heard: ${c.tags.map(t => `<span class="an-tag">${escHtml(t)}</span>`).join(' ')}</div>`);
-    }
     parts.push(signalDetailHTML(c));
+    if (c.tags && c.tags.length) {
+      // For a signal, only what the tagger made of it, as UberSDR's badge says "also heard as".
+      const head = c.label === 'signal' ? '<span class="an-muted">The audio tagger also heard:</span>' : 'Heard:';
+      parts.push(`<div class="an-detail-line">${head} ${c.tags.map(t => `<span class="an-tag">${escHtml(t)}</span>`).join(' ')}</div>`);
+    }
     if (c.reason) parts.push(`<div class="an-detail-line an-muted">${escHtml(c.reason)}</div>`);
   } else if (c && c.status !== 'pending') {
     parts.push(`<div class="an-detail-line an-muted">Classification ${escHtml(c.status)}${c.reason ? ': ' + escHtml(c.reason) : ''}</div>`);
@@ -742,9 +772,9 @@ function lastHeardHTML(lh) {
     ? `<div class="ch-last-line" title="Latest transcript line">“${escHtml(lh.last_line)}”</div>` : '';
   return `<div class="ch-last-heard" title="The latest segment classified on this channel">
       <span class="ch-last-title">Last heard</span>
-      <span class="an-label an-${AN_KEY(lh.label)}">${escHtml(AN_LABELS[lh.label] || lh.label)} ${share}%</span>
-      ${signalChipHTML(lh.signal)}
-      ${tagChipsHTML(lh.tags, 3)}
+      <span class="an-label ${labelClass(lh)}">${escHtml(labelText(lh))} ${share}%</span>
+      ${lh.label === 'signal' ? otherSignalChipsHTML(lh.signal) : signalChipHTML(lh.signal)}
+      ${lh.label === 'signal' ? '' : tagChipsHTML(lh.tags, 3)}
       <span class="an-muted">${escHtml(fmtAgo(end))}</span>
       ${line}
     </div>`;
@@ -813,7 +843,7 @@ function toggleTranscript(btn) {
 // arrives over SSE — a live recording's summary grows segment by segment.
 
 function summarizeSegments(segs) {
-  let seen = false, classifiedSec = 0, v = 0, m = 0, z = 0;
+  let seen = false, classifiedSec = 0, v = 0, m = 0, z = 0, sg = 0;
   let classified = 0, pending = 0, skipped = 0, failed = 0, transcribed = 0, lines = 0, partial = 0;
   const tags = {};
   const sigs = {};
@@ -828,12 +858,14 @@ function summarizeSegments(segs) {
         classified++;
         const d = seg.duration_sec || 0;
         classifiedSec += d;
-        v += d * (c.voice_pct || 0); m += d * (c.music_pct || 0); z += d * (c.noise_pct || 0);
-        (c.tags || []).forEach(tag => { tags[tag] = (tags[tag] || 0) + 1; });
-        segmentSignals(c.signal).forEach(o => {
+        v += d * (c.voice_pct || 0); m += d * (c.music_pct || 0); z += d * (c.noise_pct || 0); sg += d * (c.signal_pct || 0);
+        // What the tagger heard in a signal is not what is there (FT8 as music).
+        if (c.label !== 'signal') (c.tags || []).forEach(tag => { tags[tag] = (tags[tag] || 0) + 1; });
+        segmentSignals(c.signal).forEach((o, i) => {
           const k = (o.family ? 'f:' : 'n:') + o.name;
-          if (!sigs[k]) sigs[k] = { ...o, segments: 0 };
+          if (!sigs[k]) sigs[k] = { ...o, segments: 0, heads: 0 };
           sigs[k].segments++;
+          if (i === 0) sigs[k].heads++; // the one the segment is called after
         });
       } else statuses.add(c.status);
     }
@@ -852,14 +884,17 @@ function summarizeSegments(segs) {
   }
   if (!seen) return null;
   const share = x => classifiedSec ? x / classifiedSec : 0;
-  const vp = share(v), mp = share(m), zp = share(z);
+  const vp = share(v), mp = share(m), zp = share(z), sp = share(sg);
   let label = '';
   if (classifiedSec) {
-    label = zp >= 60 ? 'noise' : (vp >= 25 && mp >= 25) ? 'voice+music' : vp >= mp ? 'voice' : 'music';
+    // As the server's summary: mostly signal is "signal"; else the rest is
+    // labelled on its own shares.
+    const rest = 100 - sp, of = x => rest > 0 ? 100 * x / rest : 0;
+    label = sp >= 50 ? 'signal' : of(zp) >= 60 ? 'noise' : (of(vp) >= 25 && of(mp) >= 25) ? 'voice+music' : vp >= mp ? 'voice' : 'music';
   }
   const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  const signals = Object.values(sigs).sort((a, b) => b.segments - a.segments || a.family - b.family || a.signal.localeCompare(b.signal));
-  return { label, vp, mp, zp, classified, classifiedSec, pending, skipped, failed, transcribed, lines, partial, tags: tagList, signals, tx };
+  const signals = Object.values(sigs).sort((a, b) => b.segments - a.segments || b.heads - a.heads || a.family - b.family || a.signal.localeCompare(b.signal));
+  return { label, vp, mp, zp, sp, classified, classifiedSec, pending, skipped, failed, transcribed, lines, partial, tags: tagList, signals, tx };
 }
 
 function fmtClock(iso) {
@@ -880,18 +915,25 @@ function renderSessionAnalysis(card) {
     return;
   }
   const soFar = live ? ' so far' : '';
+  // A recording that is mostly signal is named after its most identified one.
+  const top = sum.signals[0];
+  const sumText = sum.label === 'signal' && top ? top.signal : (AN_LABELS[sum.label] || '');
+  const sumClass = sum.label === 'signal' ? 'an-signal' + (top && top.family ? ' an-signal-family' : '') : `an-${AN_KEY(sum.label)}`;
+  const sumShare = sum.label === 'signal' ? sum.sp : Math.max(sum.vp, sum.mp, sum.zp);
+  const sharesText = `${sum.sp ? `signal ${Math.round(sum.sp)}% · ` : ''}voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%`;
   if (chip) {
     chip.innerHTML = sum.label
-      ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])} ${Math.round(Math.max(sum.vp, sum.mp, sum.zp))}%</span> ${signalCountChipsHTML(sum.signals.slice(0, 2))} ${tagChipsHTML(sum.tags.map(([t]) => t), 3)}`
+      ? `<span class="an-label ${sumClass}" title="Recording${soFar}: ${sharesText}">${escHtml(sumText)} ${Math.round(sumShare)}%</span> ${signalCountChipsHTML(sum.signals.slice(sum.label === 'signal' ? 1 : 0, 2))} ${tagChipsHTML(sum.tags.map(([t]) => t), 3)}`
       : '';
     // Fade the edge only when the tags do not fit (measured once laid out).
     requestAnimationFrame(() => chip.classList.toggle('sess-an-overflow', chip.scrollWidth > chip.clientWidth + 1));
   }
   const bar = sum.classifiedSec ? `
-    <div class="sa-bar" role="img" aria-label="voice ${Math.round(sum.vp)}%, music ${Math.round(sum.mp)}%, noise ${Math.round(sum.zp)}%">
-      <i class="an-voice" style="width:${sum.vp}%"></i><i class="an-music" style="width:${sum.mp}%"></i><i class="an-noise" style="width:${sum.zp}%"></i>
+    <div class="sa-bar" role="img" aria-label="${sharesText}">
+      <i class="an-signal" style="width:${sum.sp}%"></i><i class="an-voice" style="width:${sum.vp}%"></i><i class="an-music" style="width:${sum.mp}%"></i><i class="an-noise" style="width:${sum.zp}%"></i>
     </div>
     <div class="sa-legend">
+      ${sum.sp ? `<span><i class="sa-dot an-signal"></i>Signals ${Math.round(sum.sp)}%</span>` : ''}
       <span><i class="sa-dot an-voice"></i>Voice ${Math.round(sum.vp)}%</span>
       <span><i class="sa-dot an-music"></i>Music ${Math.round(sum.mp)}%</span>
       <span><i class="sa-dot an-noise"></i>Noise ${Math.round(sum.zp)}%</span>
@@ -916,7 +958,7 @@ function renderSessionAnalysis(card) {
     + (sum.partial ? `<div class="an-tx-meta">${sum.partial} segment${sum.partial !== 1 ? 's' : ''} partial: the transcriber fell behind and skipped some audio</div>` : '');
   box.innerHTML = `
     <div class="sa-head"><span class="an-title">Recording${soFar}</span>
-      ${sum.label ? `<span class="an-label an-${AN_KEY(sum.label)}">${escHtml(AN_LABELS[sum.label])}</span>` : ''}
+      ${sum.label ? `<span class="an-label ${sumClass}">${escHtml(sumText)}</span>` : ''}
       <span class="an-muted">${counts.join(' · ')}</span></div>
     ${bar}
     ${sigLine}
@@ -3519,7 +3561,7 @@ function connectSSE() {
         document.querySelectorAll(`.channel-card[data-channel-id="${CSS.escape(d.channel_id)}"]`).forEach(card =>
           setChannelLastHeard(card, {
             started_at: d.started_at, duration_sec: d.duration_sec, label: c.label,
-            voice_pct: c.voice_pct, music_pct: c.music_pct, noise_pct: c.noise_pct,
+            signal_pct: c.signal_pct, voice_pct: c.voice_pct, music_pct: c.music_pct, noise_pct: c.noise_pct,
             tags: c.tags, signal: c.signal, last_line: lines.length ? lines[lines.length - 1] : '',
           }));
         scheduleChannelRefresh(); // its "This recording" list
