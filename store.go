@@ -699,15 +699,16 @@ func (s *recordingStore) delete(id string) error {
 
 // lastHeard is a channel's most recent classified segment, for its card.
 type lastHeard struct {
-	SegmentID   string    `json:"segment_id"`
-	StartedAt   time.Time `json:"started_at"`
-	DurationSec float64   `json:"duration_sec"`
-	Label       string    `json:"label"`
-	VoicePct    float64   `json:"voice_pct"`
-	MusicPct    float64   `json:"music_pct"`
-	NoisePct    float64   `json:"noise_pct"`
-	Tags        []string  `json:"tags,omitempty"`
-	LastLine    string    `json:"last_line,omitempty"` // the segment's last transcript line, if any
+	SegmentID   string        `json:"segment_id"`
+	StartedAt   time.Time     `json:"started_at"`
+	DurationSec float64       `json:"duration_sec"`
+	Label       string        `json:"label"`
+	VoicePct    float64       `json:"voice_pct"`
+	MusicPct    float64       `json:"music_pct"`
+	NoisePct    float64       `json:"noise_pct"`
+	Tags        []string      `json:"tags,omitempty"`
+	Signal      *signalResult `json:"signal,omitempty"`    // what it was identified as, when named or a family
+	LastLine    string        `json:"last_line,omitempty"` // the segment's last transcript line, if any
 }
 
 // latestHeard returns the most recently started segment of a channel whose
@@ -734,6 +735,9 @@ func (s *recordingStore) latestHeard(channelID string) *lastHeard {
 	c := best.Analysis.Classification
 	lh := &lastHeard{SegmentID: best.ID, StartedAt: best.StartedAt, DurationSec: best.DurationSec,
 		Label: c.Label, VoicePct: c.VoicePct, MusicPct: c.MusicPct, NoisePct: c.NoisePct, Tags: c.Tags}
+	if c.Signal.anyIdentified() {
+		lh.Signal = c.Signal
+	}
 	if t := best.Analysis.Transcript; t != nil && t.Status == analysisDone && len(t.Lines) > 0 {
 		lh.LastLine = t.Lines[len(t.Lines)-1]
 	}

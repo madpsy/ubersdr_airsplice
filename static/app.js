@@ -418,8 +418,19 @@ function classifyHostNote() {
     case 'starting':    return `Loading ${name}…`;
     case 'downloading': return `Downloading ${name}… ${Math.round((c.progress || 0) * 100)}%`;
     case 'failed':      return `${name} unavailable, using DSP: ${c.error || 'failed'}`;
-    default:            return `Classifier: ${name}` + (c.queued ? ` · ${c.queued} queued` : '');
+    default:            return `Classifier: ${name}` + identifyHostNote() + (c.queued ? ` · ${c.queued} queued` : '');
   }
+}
+
+// Whether segments are also identified (FT8, CW…): only with a model this
+// build has signal references for (id.models: mn05 and mn10).
+function identifyHostNote() {
+  const id = (analysisState.classify || {}).identify || {};
+  if (id.enabled) return id.state === 'failed' ? ' · signal identification unavailable' : ' · identifies signals (FT8, CW…)';
+  if ((id.reason || '').includes('CLASSIFY_MODEL') && (id.models || []).length) {
+    return ` · signal identification needs ${id.models.join(' or ')}`;
+  }
+  return '';
 }
 
 function transcribeHostError() {
@@ -573,6 +584,7 @@ function segAnalysisHTML(seg) {
       const share = Math.round(labelShare(c) || 0);
       out += `<button class="an-label an-${AN_KEY(c.label)}" onclick="toggleSegDetail(this)" title="Show what was heard">${escHtml(AN_LABELS[c.label] || c.label)} ${share}%</button>`;
       out += windowStripHTML(c.windows);
+      out += signalChipHTML(c.signal) + otherSignalChipsHTML(c.signal);
     } else if (c.status === 'pending') {
       out += `<span class="an-label an-pending" title="Classification queued">Classifying…</span>`;
     } else {
@@ -612,6 +624,7 @@ function segDetailHTML(seg) {
     if (c.tags && c.tags.length) {
       parts.push(`<div class="an-detail-line">Heard: ${c.tags.map(t => `<span class="an-tag">${escHtml(t)}</span>`).join(' ')}</div>`);
     }
+    parts.push(signalDetailHTML(c));
     if (c.reason) parts.push(`<div class="an-detail-line an-muted">${escHtml(c.reason)}</div>`);
   } else if (c && c.status !== 'pending') {
     parts.push(`<div class="an-detail-line an-muted">Classification ${escHtml(c.status)}${c.reason ? ': ' + escHtml(c.reason) : ''}</div>`);
@@ -627,6 +640,85 @@ function segDetailHTML(seg) {
 function tagChipsHTML(tags, n) {
   const list = n ? (tags || []).slice(0, n) : (tags || []);
   return list.map(t => `<span class="an-tag">${escHtml(t)}</span>`).join(' ');
+}
+
+// The identified signal as a chip: a name ("FT8") or only a family ("FSK"),
+// or '' when the segment was not identified. Hover says how sure.
+function signalChipHTML(sig, count) {
+  if (!sig || (sig.say !== 'name' && sig.say !== 'family')) return '';
+  const named = sig.say === 'name';
+  const text = named ? sig.short : sig.family_text;
+  const title = named
+    ? `Identified as ${sig.name} — ${Math.round((sig.p || 0) * 100)}% likely`
+    : `A ${sig.family_text} signal — ${Math.round((sig.family_p || 0) * 100)}% likely; not sure which`;
+  return `<span class="an-sig${named ? '' : ' an-sig-family'}${named && sig.p > 0.9 ? ' an-sig-sure' : ''}" title="${escHtml(title)}">${escHtml(text)}${count ? ` <b>${count}</b>` : ''}</span>`;
+}
+
+// Every signal or family a segment's minutes identified, once each, the
+// segment's own call first: [{signal, name, family}]. A segment of a minute or
+// less has no runs and is its own call.
+function segmentSignals(sig) {
+  if (!sig) return [];
+  const runs = sig.runs && sig.runs.length ? sig.runs : [sig];
+  const out = [], seen = new Set();
+  const add = (say, name, short, fam) => {
+    if (say !== 'name' && say !== 'family') return;
+    const isFam = say === 'family';
+    const k = (isFam ? 'f:' : 'n:') + (isFam ? fam : name);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ signal: isFam ? fam : short, name: isFam ? fam : name, family: isFam });
+  };
+  add(sig.say, sig.name, sig.short, sig.family_text);
+  runs.forEach(r => add(r.say, r.name, r.short, r.family_text));
+  return out;
+}
+
+// The other signals a segment's minutes identified, besides its own call.
+function otherSignalChipsHTML(sig) {
+  return segmentSignals(sig).slice(1).map(o =>
+    `<span class="an-sig an-sig-other${o.family ? ' an-sig-family' : ''}" title="${escHtml(o.family ? `A ${o.name} signal` : o.name)} in part of this segment">${escHtml(o.signal)}</span>`).join(' ');
+}
+
+// A recording's identified signals ([{signal, name, family, segments}]) as chips.
+function signalCountChipsHTML(list) {
+  return (list || []).map(sc =>
+    `<span class="an-sig${sc.family ? ' an-sig-family' : ''}" title="${escHtml(sc.family ? `A ${sc.name} signal` : sc.name)} in ${sc.segments} segment${sc.segments !== 1 ? 's' : ''}">${escHtml(sc.signal)} <b>${sc.segments}</b></span>`).join(' ');
+}
+
+// What the identification said, for a segment's details.
+function signalDetailHTML(c) {
+  const sig = c.signal;
+  if (!sig) return c.signal_note ? `<div class="an-detail-line an-muted">Not identified: ${escHtml(c.signal_note)}</div>` : '';
+  const pct = x => `${Math.round((x || 0) * 100)}%`;
+  const over = `${sig.windows} window${sig.windows !== 1 ? 's' : ''} of 5 s`;
+  const others = list => list.filter(t => t.p >= 0.01).map(t => `${escHtml(t.name)} ${pct(t.p)}`).join(', ');
+  let line;
+  switch (sig.say) {
+    case 'name':
+      line = `Identified: <b>${escHtml(sig.name)}</b> — ${pct(sig.p)} likely · kind ${escHtml(sig.family_text)} (${pct(sig.family_p)})`;
+      if (others(sig.top.slice(1))) line += ` · next closest: ${others(sig.top.slice(1))}`;
+      break;
+    case 'family':
+      line = `Identified: a <b>${escHtml(sig.family_text)}</b> signal — ${pct(sig.family_p)} likely, not sure which · closest: ${others(sig.top)}`;
+      break;
+    case 'voice':
+      line = `Identified: voice (speech in ${sig.speech} of ${over})`;
+      break;
+    default:
+      line = sig.windows < 4
+        ? `Not identified: too short (${over}; needs 4)`
+        : `No particular signal recognised${sig.top.length ? ` (closest: ${escHtml(sig.top[0].name)} ${pct(sig.top[0].p)})` : ''}`;
+  }
+  let runs = '';
+  if (sig.runs && sig.runs.length > 1) {
+    const mmss = t => `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}`;
+    const call = r => r.say === 'name' ? `<b>${escHtml(r.short)}</b> ${pct(r.p)}`
+      : r.say === 'family' ? `${escHtml(r.family_text)} ${pct(r.p)}`
+      : r.say === 'voice' ? 'voice' : '<span class="an-muted">—</span>';
+    runs = `<div class="an-detail-line">By minute: ${sig.runs.map(r => `<span class="an-run">${mmss(r.start_sec)} ${call(r)}</span>`).join(' · ')}</div>`;
+  }
+  return `<div class="an-detail-line">${line} <span class="an-muted">(${over}${sig.runs && sig.runs.length > 1 ? ', a minute at a time' : ''})</span></div>${runs}`;
 }
 
 function fmtAgo(date) {
@@ -648,6 +740,7 @@ function lastHeardHTML(lh) {
   return `<div class="ch-last-heard" title="The latest segment classified on this channel">
       <span class="ch-last-title">Last heard</span>
       <span class="an-label an-${AN_KEY(lh.label)}">${escHtml(AN_LABELS[lh.label] || lh.label)} ${share}%</span>
+      ${signalChipHTML(lh.signal)}
       ${tagChipsHTML(lh.tags, 3)}
       <span class="an-muted">${escHtml(fmtAgo(end))}</span>
       ${line}
@@ -658,8 +751,8 @@ function lastHeardHTML(lh) {
 // current recording, with the number of segments each was among the strongest
 // of. ra is the server's recording_analysis (a session summary).
 function recordingTagsHTML(ra, live) {
-  if (!ra || !ra.tags || !ra.tags.length) return '';
-  const chips = ra.tags.map(tc =>
+  if (!ra || !((ra.tags && ra.tags.length) || (ra.signals && ra.signals.length))) return '';
+  const chips = signalCountChipsHTML(ra.signals) + ' ' + (ra.tags || []).map(tc =>
     `<span class="an-tag" title="Among the strongest sounds in ${tc.segments} segment${tc.segments !== 1 ? 's' : ''}">${escHtml(tc.tag)} <b>${tc.segments}</b></span>`).join(' ');
   return `<div class="ch-rec-tags"><span class="ch-last-title">${live ? 'This recording' : 'Last recording'}</span> ${chips}</div>`;
 }
@@ -720,6 +813,7 @@ function summarizeSegments(segs) {
   let seen = false, classifiedSec = 0, v = 0, m = 0, z = 0;
   let classified = 0, pending = 0, skipped = 0, failed = 0, transcribed = 0, lines = 0, partial = 0;
   const tags = {};
+  const sigs = {};
   const tx = [];
   for (const seg of segs || []) {
     if (seg._live || !seg.analysis) continue;
@@ -733,6 +827,11 @@ function summarizeSegments(segs) {
         classifiedSec += d;
         v += d * (c.voice_pct || 0); m += d * (c.music_pct || 0); z += d * (c.noise_pct || 0);
         (c.tags || []).forEach(tag => { tags[tag] = (tags[tag] || 0) + 1; });
+        segmentSignals(c.signal).forEach(o => {
+          const k = (o.family ? 'f:' : 'n:') + o.name;
+          if (!sigs[k]) sigs[k] = { ...o, segments: 0 };
+          sigs[k].segments++;
+        });
       } else statuses.add(c.status);
     }
     if (t) {
@@ -756,7 +855,8 @@ function summarizeSegments(segs) {
     label = zp >= 60 ? 'noise' : (vp >= 25 && mp >= 25) ? 'voice+music' : vp >= mp ? 'voice' : 'music';
   }
   const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  return { label, vp, mp, zp, classified, classifiedSec, pending, skipped, failed, transcribed, lines, partial, tags: tagList, tx };
+  const signals = Object.values(sigs).sort((a, b) => b.segments - a.segments || a.family - b.family || a.signal.localeCompare(b.signal));
+  return { label, vp, mp, zp, classified, classifiedSec, pending, skipped, failed, transcribed, lines, partial, tags: tagList, signals, tx };
 }
 
 function fmtClock(iso) {
@@ -779,7 +879,7 @@ function renderSessionAnalysis(card) {
   const soFar = live ? ' so far' : '';
   if (chip) {
     chip.innerHTML = sum.label
-      ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])} ${Math.round(Math.max(sum.vp, sum.mp, sum.zp))}%</span> ${tagChipsHTML(sum.tags.map(([t]) => t), 3)}`
+      ? `<span class="an-label an-${AN_KEY(sum.label)}" title="Recording${soFar}: voice ${Math.round(sum.vp)}% · music ${Math.round(sum.mp)}% · noise ${Math.round(sum.zp)}%">${escHtml(AN_LABELS[sum.label])} ${Math.round(Math.max(sum.vp, sum.mp, sum.zp))}%</span> ${signalCountChipsHTML(sum.signals.slice(0, 2))} ${tagChipsHTML(sum.tags.map(([t]) => t), 3)}`
       : '';
     // Fade the edge only when the tags do not fit (measured once laid out).
     requestAnimationFrame(() => chip.classList.toggle('sess-an-overflow', chip.scrollWidth > chip.clientWidth + 1));
@@ -801,6 +901,8 @@ function renderSessionAnalysis(card) {
     ? `<div class="sa-tags"><span class="sa-sub">Heard${soFar}:</span> ${sum.tags.map(([t, n]) =>
         `<span class="an-tag" title="Among the strongest sounds in ${n} segment${n !== 1 ? 's' : ''}">${escHtml(t)} <b>${n}</b></span>`).join(' ')}</div>`
     : '';
+  const sigLine = sum.signals.length
+    ? `<div class="sa-tags"><span class="sa-sub">Identified${soFar}:</span> ${signalCountChipsHTML(sum.signals)}</div>` : '';
   const wasOpen = uiOpen.has('sesstx:' + cardKeyOf(card));
   const txBtn = sum.lines
     ? `<button class="an-tx-btn sa-tx-btn" onclick="toggleSessionTranscript(this)">📝 Transcript of the recording${soFar} (${sum.lines} line${sum.lines !== 1 ? 's' : ''})</button>`
@@ -814,6 +916,7 @@ function renderSessionAnalysis(card) {
       ${sum.label ? `<span class="an-label an-${AN_KEY(sum.label)}">${escHtml(AN_LABELS[sum.label])}</span>` : ''}
       <span class="an-muted">${counts.join(' · ')}</span></div>
     ${bar}
+    ${sigLine}
     ${tags}
     ${txBtn}
     <div class="sa-transcript seg-transcript${wasOpen ? '' : ' hidden'}">${txBody}</div>`;
@@ -3400,7 +3503,7 @@ function connectSSE() {
           setChannelLastHeard(card, {
             started_at: d.started_at, duration_sec: d.duration_sec, label: c.label,
             voice_pct: c.voice_pct, music_pct: c.music_pct, noise_pct: c.noise_pct,
-            tags: c.tags, last_line: lines.length ? lines[lines.length - 1] : '',
+            tags: c.tags, signal: c.signal, last_line: lines.length ? lines[lines.length - 1] : '',
           }));
         scheduleChannelRefresh(); // its "This recording" list
       }

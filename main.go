@@ -536,6 +536,8 @@ func main() {
 			"Classifier: "+strings.Join(classifyModels, ", ")+" (env: CLASSIFY_MODEL)")
 		classifyThreads = flag.Int("classify-threads", envIntOr("CLASSIFY_THREADS", 1),
 			"CPU threads for the classifier (env: CLASSIFY_THREADS)")
+		identify = flag.Bool("identify", envBoolOr("IDENTIFY", true),
+			"Also name the signal in classified segments (FT8, CW, RTTY...); only with a -classify-model this build has references for: "+strings.Join(signalModels(), ", ")+" (env: IDENTIFY)")
 		transcribe = flag.Bool("transcribe", envBoolOr("TRANSCRIBE", true),
 			"Offer Whisper transcription to channels; false turns it off for the host (env: TRANSCRIBE)")
 		whisperHelper = flag.String("whisper-helper", envOr("WHISPER_HELPER", "whisper-helper"),
@@ -566,6 +568,7 @@ func main() {
 		Classify:           *classify,
 		ClassifyModel:      *classifyModel,
 		ClassifyThreads:    *classifyThreads,
+		Identify:           *identify,
 		Transcribe:         *transcribe,
 		WhisperHelper:      *whisperHelper,
 		WhisperModel:       *whisperModel,

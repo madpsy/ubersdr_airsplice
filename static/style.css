@@ -1137,6 +1137,7 @@ section h2 { font-size: 1rem; font-weight: 600; color: var(--muted); text-transf
   border: 1px solid var(--border);
   color: var(--muted);
   cursor: default;
+  white-space: nowrap;
 }
 .an-voice       { background: #0f2a1a; color: var(--accent2); border-color: var(--accent2); }
 .an-music       { background: #24163a; color: #c4a1f7; border-color: #8b6bd1; }
@@ -1216,6 +1217,28 @@ button.an-label:hover { filter: brightness(1.25); }
   white-space: nowrap;
 }
 .an-tag b { color: var(--muted); font-weight: 600; margin-left: 2px; }
+
+/* an identified signal: a name (FT8, CW…) or, dashed, only a family (FSK…) */
+.an-sig {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 1px 8px;
+  margin: 1px 0;
+  border-radius: 10px;
+  background: #16203a;
+  border: 1px solid var(--accent);
+  color: #93b4f5;
+  white-space: nowrap;
+  cursor: default;
+}
+.an-sig.an-sig-sure { border-color: var(--accent2); color: var(--accent2); background: #0f2a1a; }
+.an-sig.an-sig-family { border-style: dashed; font-weight: 600; background: transparent; }
+.an-sig b { color: var(--muted); font-weight: 600; margin-left: 2px; }
+.an-sig.an-sig-other { opacity: 0.7; font-weight: 600; }
+.an-run { white-space: nowrap; }
+.seg-tags .an-sig, .sess-an-chip .an-sig, .ch-last-heard .an-sig, .ch-rec-tags .an-sig { font-size: 0.7rem; padding: 0 7px; }
 
 .seg-an-detail {
   grid-column: 1 / -1;

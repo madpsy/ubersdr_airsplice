@@ -53,15 +53,25 @@ type analysisSettings struct {
 	Classify        bool
 	ClassifyModel   string
 	ClassifyThreads int
-	Transcribe      bool
-	WhisperHelper   string
-	WhisperModel    string
-	WhisperThreads  int
-	WhisperSpeed    float64 // feed pace, x real time; 0 = auto (adaptive)
+	// Identify names the signal (FT8, CW, RTTY...) from the classifier's
+	// embedding and UberSDR's signal references (signals.go). Only with a
+	// ClassifyModel this build has references for (signalModels).
+	Identify       bool
+	Transcribe     bool
+	WhisperHelper  string
+	WhisperModel   string
+	WhisperThreads int
+	WhisperSpeed   float64 // feed pace, x real time; 0 = auto (adaptive)
 	// WhisperSizedFinals passes --sized-finals: each utterance encoded at its
 	// own length rather than Whisper's 30 s window, several times cheaper.
 	WhisperSizedFinals bool
 	ModelDir           string
+}
+
+// identifies reports whether segments are identified as well as classified:
+// IDENTIFY on, classification on, and references for its model.
+func (s *analysisSettings) identifies() bool {
+	return s.Classify && s.Identify && hasSignals(s.ClassifyModel)
 }
 
 // classifyModels are the CLASSIFY_MODEL values this build implements: the
@@ -113,18 +123,23 @@ type segmentAnalysis struct {
 }
 
 type classificationResult struct {
-	Status     string    `json:"status"`
-	Label      string    `json:"label,omitempty"` // voice | music | voice+music | noise
-	VoicePct   float64   `json:"voice_pct"`
-	MusicPct   float64   `json:"music_pct"`
-	NoisePct   float64   `json:"noise_pct"`
-	Backend    string    `json:"backend,omitempty"` // the classifier that actually ran, e.g. "dsp", "dsp+snr"
-	Confidence float64   `json:"confidence,omitempty"`
-	Windows    []string  `json:"windows,omitempty"` // per-window verdicts, in order
-	BandHz     []int     `json:"band_hz,omitempty"` // audio band measured, Hz (dsp)
-	Tags       []string  `json:"tags,omitempty"`    // strongest radio-relevant AudioSet labels (EfficientAT)
-	Reason     string    `json:"reason,omitempty"`  // why skipped or failed
-	At         time.Time `json:"at,omitempty"`
+	Status     string   `json:"status"`
+	Label      string   `json:"label,omitempty"` // voice | music | voice+music | noise
+	VoicePct   float64  `json:"voice_pct"`
+	MusicPct   float64  `json:"music_pct"`
+	NoisePct   float64  `json:"noise_pct"`
+	Backend    string   `json:"backend,omitempty"` // the classifier that actually ran, e.g. "dsp", "dsp+snr"
+	Confidence float64  `json:"confidence,omitempty"`
+	Windows    []string `json:"windows,omitempty"` // per-window verdicts, in order
+	BandHz     []int    `json:"band_hz,omitempty"` // audio band measured, Hz (dsp)
+	Tags       []string `json:"tags,omitempty"`    // strongest radio-relevant AudioSet labels (EfficientAT)
+	// Signal is what the segment was identified as (FT8, CW, a family such as
+	// FSK, or nothing); SignalNote says why there is none when identification
+	// was meant to run and could not.
+	Signal     *signalResult `json:"signal,omitempty"`
+	SignalNote string        `json:"signal_note,omitempty"`
+	Reason     string        `json:"reason,omitempty"` // why skipped or failed
+	At         time.Time     `json:"at,omitempty"`
 }
 
 type transcriptResult struct {
@@ -286,6 +301,14 @@ func (a *analyzer) start(ctx context.Context) {
 	// Models are downloaded and loaded only once a channel uses them (use).
 	if a.settings.Classify {
 		log.Printf("[analysis] classification available (model %s, loaded when a channel opts in)", a.settings.ClassifyModel)
+		switch {
+		case a.settings.identifies():
+			if ref, err := builtinSignals(a.settings.ClassifyModel); err == nil {
+				log.Printf("[analysis] signal identification available (%s: %d signals, %d references)", a.settings.ClassifyModel, ref.s, ref.n)
+			}
+		case a.settings.Identify:
+			log.Printf("[analysis] signal identification off: no references for %s (available for: %s)", a.settings.ClassifyModel, strings.Join(signalModels(), ", "))
+		}
 	}
 	if a.whisper != nil {
 		pace := "auto"
@@ -470,6 +493,9 @@ func (a *analyzer) runClassify(ctx context.Context, j analysisJob) *classificati
 		// The model resamples straight to its own 32 kHz.
 		if m, why := a.eat.get(ctx); m != nil {
 			res, err = m.classifyFrom(newResampledReader(wav, wav.rate, eatRate))
+			if err == nil && a.settings.identifies() {
+				res.Signal, res.SignalNote = identifySegment(m, a.settings.ClassifyModel, j.wavPath)
+			}
 		} else {
 			// Never lose a segment's label to the model: fall back, and say so.
 			if res, err = dsp(); err == nil {
@@ -492,6 +518,29 @@ func (a *analyzer) runClassify(ctx context.Context, j analysisJob) *classificati
 		}
 	}
 	return res
+}
+
+// identify names the signal in a segment (signals.go): a second pass over the
+// file, in the 5 s windows the references were made with. A failure here costs
+// the segment its name, never its classification.
+func identifySegment(m *eatModel, model, path string) (*signalResult, string) {
+	ref, err := builtinSignals(model)
+	if err != nil {
+		return nil, "signal references unusable: " + err.Error()
+	}
+	wav, err := openWAVStream(path)
+	if err != nil {
+		return nil, err.Error()
+	}
+	defer wav.Close()
+	sig, err := m.identifyFrom(newResampledReader(wav, wav.rate, eatRate), ref)
+	if err != nil {
+		return nil, err.Error()
+	}
+	if sig == nil {
+		return nil, "no audio to identify"
+	}
+	return sig, ""
 }
 
 func (a *analyzer) transcribeWorker(ctx context.Context) {
@@ -569,6 +618,22 @@ func (a *analyzer) statusSnapshot() map[string]interface{} {
 			classify[k] = v
 		}
 	}
+	identify := map[string]interface{}{"enabled": s.identifies(), "state": "disabled", "models": signalModels()}
+	switch {
+	case s.identifies():
+		if ref, err := builtinSignals(s.ClassifyModel); err != nil {
+			identify["state"], identify["error"] = "failed", err.Error()
+		} else {
+			identify["state"], identify["signals"], identify["references"] = "ready", ref.s, ref.n
+		}
+	case !s.Identify:
+		identify["reason"] = "turned off for this host (IDENTIFY)"
+	case !s.Classify:
+		identify["reason"] = "classification is off for this host"
+	case !hasSignals(s.ClassifyModel):
+		identify["reason"] = fmt.Sprintf("no signal references for %s: needs CLASSIFY_MODEL=%s", s.ClassifyModel, strings.Join(signalModels(), " or "))
+	}
+	classify["identify"] = identify
 	transcribe := map[string]interface{}{
 		"enabled": s.Transcribe,
 		"model":   s.WhisperModel,
@@ -604,19 +669,29 @@ func shortID(id string) string {
 // sessionAnalysis summarises the analysis of a recording's segments: what the
 // recording as a whole (or so far) contains.
 type sessionAnalysis struct {
-	Label              string     `json:"label,omitempty"` // voice | music | voice+music | noise, time-weighted
-	VoicePct           float64    `json:"voice_pct"`
-	MusicPct           float64    `json:"music_pct"`
-	NoisePct           float64    `json:"noise_pct"`
-	ClassifiedSec      float64    `json:"classified_sec"`
-	Classified         int        `json:"classified"` // segments with a classification
-	Pending            int        `json:"pending"`    // still queued (classification or transcript)
-	Skipped            int        `json:"skipped"`
-	Failed             int        `json:"failed"`
-	Tags               []tagCount `json:"tags,omitempty"` // every distinct tag, most widespread first
-	Transcribed        int        `json:"transcribed"`    // segments with a finished transcript
-	TranscriptLines    int        `json:"transcript_lines"`
-	PartialTranscripts int        `json:"partial_transcripts,omitempty"`
+	Label         string     `json:"label,omitempty"` // voice | music | voice+music | noise, time-weighted
+	VoicePct      float64    `json:"voice_pct"`
+	MusicPct      float64    `json:"music_pct"`
+	NoisePct      float64    `json:"noise_pct"`
+	ClassifiedSec float64    `json:"classified_sec"`
+	Classified    int        `json:"classified"` // segments with a classification
+	Pending       int        `json:"pending"`    // still queued (classification or transcript)
+	Skipped       int        `json:"skipped"`
+	Failed        int        `json:"failed"`
+	Tags          []tagCount `json:"tags,omitempty"` // every distinct tag, most widespread first
+	// Signals are the signals identified (named, or only a family), most
+	// widespread first.
+	Signals            []signalCount `json:"signals,omitempty"`
+	Transcribed        int           `json:"transcribed"` // segments with a finished transcript
+	TranscriptLines    int           `json:"transcript_lines"`
+	PartialTranscripts int           `json:"partial_transcripts,omitempty"`
+}
+
+type signalCount struct {
+	Signal   string `json:"signal"` // badge text: "FT8", or a family such as "FSK"
+	Name     string `json:"name"`   // the signal's full name; for a family, its badge text
+	Family   bool   `json:"family,omitempty"`
+	Segments int    `json:"segments"`
 }
 
 type tagCount struct {
@@ -631,6 +706,7 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 	var sa sessionAnalysis
 	seen := false
 	tags := map[string]int{}
+	sigs := map[signalCount]int{}
 	var v, m, z float64
 	for _, r := range segs {
 		an := r.Analysis
@@ -663,6 +739,9 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 				z += d * c.NoisePct
 				for _, t := range c.Tags {
 					tags[t]++
+				}
+				for _, k := range c.Signal.counts() {
+					sigs[k]++
 				}
 			} else {
 				count(c.Status)
@@ -701,6 +780,20 @@ func summarizeAnalysis(segs []*recordingRecord) *sessionAnalysis {
 	for t, n := range tags {
 		sa.Tags = append(sa.Tags, tagCount{t, n})
 	}
+	for k, n := range sigs {
+		k.Segments = n
+		sa.Signals = append(sa.Signals, k)
+	}
+	sort.Slice(sa.Signals, func(i, j int) bool {
+		a, b := sa.Signals[i], sa.Signals[j]
+		if a.Segments != b.Segments {
+			return a.Segments > b.Segments
+		}
+		if a.Family != b.Family {
+			return !a.Family // names before families
+		}
+		return a.Signal < b.Signal
+	})
 	sort.Slice(sa.Tags, func(i, j int) bool {
 		if sa.Tags[i].Segments != sa.Tags[j].Segments {
 			return sa.Tags[i].Segments > sa.Tags[j].Segments

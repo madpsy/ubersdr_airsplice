@@ -24,6 +24,10 @@ services:
       # opts in from the web UI, and models are downloaded only when one does.
       # CLASSIFY: "false"        # turn off voice / music / noise labels for this host
       # CLASSIFY_MODEL: "mn10"   # mn05 | mn10 | mn20 (EfficientAT, downloaded to /data/models) | dsp
+      #                          # Signal identification (FT8, CW, RTTY...) works ONLY with a model that has
+      #                          # signal references built in (signals_<model>.bin): mn05 and mn10
+      #                          # (the default). Not mn20 or dsp.
+      # IDENTIFY: "false"        # turn off naming the signal in each segment
       # TRANSCRIBE: "false"      # turn off Whisper transcripts for this host
       # WHISPER_HELPER: "/opt/whisper/whisper-helper"   # included in the published image
       # WHISPER_MODEL: "base"    # tiny | base | small (downloaded to /data/models on first use)

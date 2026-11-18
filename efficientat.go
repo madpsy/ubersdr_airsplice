@@ -602,6 +602,14 @@ func (se *eatSE) apply(x fmap) {
 
 // predict returns the 527 AudioSet class probabilities for a mel spectrogram.
 func (m *eatModel) predict(spec fmap) []float32 {
+	probs, _ := m.forward(spec)
+	return probs
+}
+
+// forward is predict that also returns the embedding: the classifier's hidden
+// layer after its hardswish, which the 527 outputs are a linear map of. It is
+// what UberSDR's signal references are made of (signals.go).
+func (m *eatModel) forward(spec fmap) (probs, embedding []float32) {
 	x := m.firstConv(spec)
 	for bi := range m.blocks {
 		b := &m.blocks[bi]
@@ -640,7 +648,7 @@ func (m *eatModel) predict(spec fmap) []float32 {
 		z := f32Dot(m.fc2W[i*m.hidden:(i+1)*m.hidden], h) + m.fc2B[i]
 		out[i] = float32(1 / (1 + math.Exp(-float64(z))))
 	}
-	return out
+	return out, h
 }
 
 // ── from AudioSet tags to voice / music / noise (NightDX classify.py) ─────────

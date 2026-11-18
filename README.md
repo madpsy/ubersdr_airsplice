@@ -73,6 +73,7 @@ All configuration is via environment variables in `docker-compose.yml`:
 | `CLASSIFY` | `true` | Offer voice / music / noise classification to channels; `false` turns it off for the host — see [Analysis](#analysis-optional) |
 | `CLASSIFY_MODEL` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` (EfficientAT) or `dsp` (no model) |
 | `CLASSIFY_THREADS` | `1` | CPU threads for the classifier |
+| `IDENTIFY` | `true` | Also name the signal in classified segments (FT8, CW, RTTY…) — **only with `CLASSIFY_MODEL` `mn10` (the default) or `mn05`**, the models with signal references; see [Signal identification](#signal-identification) |
 | `TRANSCRIBE` | `true` | Offer Whisper transcription to channels; `false` turns it off for the host |
 | `WHISPER_HELPER` | `whisper-helper` | Path to UberSDR's `whisper-helper` binary |
 | `WHISPER_MODEL` | `base` | `tiny`, `base` or `small` |
@@ -188,6 +189,28 @@ Labels each segment **voice**, **music**, **voice + music** or **noise**, with t
 
 **SNR rule.** Whichever classifier runs, a segment whose average passband SNR is below 3 dB is noise whatever the classifier hears in the hiss (an empty channel reads about 0 dB on the v4 scale). The label's backend then ends in `+snr`.
 
+### Signal identification
+
+**Only with `CLASSIFY_MODEL` `mn10` (the default) or `mn05`** (and `IDENTIFY`, on unless set to `false`): the models with signal references. `mn20` has none, and `dsp` has no embedding at all; with either it is off, and the channel settings say so.
+
+Each classified segment is also named — **FT8**, **CW**, **RTTY**… — or, when the kind is clear but not the signal, given a family (**FSK**, **PSK**, **OOK**…). It is the identification UberSDR's v2 page does in the listener's browser, run here on the segment: besides its AudioSet tags, the model computes an embedding of every window (1,280 numbers for mn10, 640 for mn05), and that is compared with signal references — the same embedding for about 1,800 reference recordings of about 500 signals — which are built into airsplice. References are one network's embeddings and mean nothing to another's, so there is a file per model: `signals_mn10.bin` and `signals_mn05.bin` (the latter is UberSDR's own `static/v2/audioclass/signals.bin`), with the same reference recordings, each embedded with its own network and with naming thresholds tuned for it. airsplice refuses a file whose header names other weights.
+
+How a segment is named, as UberSDR does it: 5-second windows every 2.5 s (a second pass over the segment, separate from the 10-second classification windows; digitally silent windows are skipped), summed a minute at a time (24 windows, the span UberSDR's page uses) and compared with every reference. A **name** needs 70% of the probability and the windows close enough to that signal's references (how close is set per model, in its references file); else a **family** with 70%; else nothing. Nothing is named from fewer than 4 windows (about 12.5 s of audio). When enough windows are speech the result is voice instead. A segment longer than a minute is called minute by minute, so a channel that carries FT8 and then a voice net is not blurred into nothing: the segment is called after the signal most of its minutes name (the surer on a tie), and every signal any minute named is listed with it. It costs about twice the classification's own CPU again, since its windows are half as long and overlap: on one thread, per minute of audio, mn10 takes about 2.9 s to identify against 1.3 s to classify, mn05 1.7 s against 0.8 s.
+
+What to expect, from 45 off-air captures labelled by frequency, each scored as one minute (right name, or voice for SSB):
+
+| Signal | `mn10` | `mn05` |
+|---|---|---|
+| FT8 (10) | 10 | 8 (1 nothing, 1 wrongly voice) |
+| FT4 (6) | 3 | 3 |
+| CW (8) | 7 (1 nothing) | 8 |
+| SSB voice (9) | 6 (1 wrongly named FreeDV) | 6 |
+| Wrong calls, all 45 | 2 | 3 |
+
+The two are on a par: a small sample, not a win for either. JS8 reads as FT8 with both (same modulation). WSPR, PSK31, WEFAX, RTTY and AM broadcast are left unnamed rather than named wrongly. On voice channels it mostly says voice or nothing.
+
+Both files are compiled into the binary, so the Docker image carries them, and a build without either fails. To update the references, replace the `signals_<model>.bin` file and rebuild.
+
 ### Transcription
 
 Runs UberSDR's `whisper-helper` ([`clients/electron/whisper`](https://github.com/madpsy/ka9q_ubersdr/tree/main/clients/electron/whisper)) — whisper.cpp with Silero voice-activity detection, the same recogniser the UberSDR desktop client uses — as a child process at low CPU priority. Three ways to provide it:
@@ -212,21 +235,24 @@ Results are stored in each segment's `.json` sidecar under `analysis`, and pushe
 "analysis": {
   "classification": { "status": "done", "label": "voice", "voice_pct": 80, "music_pct": 0, "noise_pct": 20,
                       "backend": "mn10", "confidence": 0.84, "windows": ["voice", "voice", "voice", "voice", "noise"],
-                      "tags": ["Speech", "Radio", "Male speech, man speaking"] },
+                      "tags": ["Speech", "Radio", "Male speech, man speaking"],
+                      "signal": { "say": "voice", "name": "FreeDV COHPSK", "short": "FreeDV…", "p": 0.77, "family": "ofdm",
+                                  "family_text": "OFDM", "family_p": 0.77, "top": [{ "name": "FreeDV COHPSK", "p": 0.77 }, …],
+                                  "windows": 24, "speech": 13, "runs": [ … ] } },
   "transcript": { "status": "done", "language": "en", "model": "base", "text": "…", "lines": ["…"], "partial": false }
 }
 ```
 
-`status` is `pending`, `done`, `skipped` or `failed` (with a `reason`). Segments under 2 s are skipped. Work still pending at shutdown is picked up again on the next start. `GET /api/analysis` reports what the host offers: whether each feature is enabled, the model, each one's state (`starting`, `downloading`, `ready`, `unavailable`, `failed`) and the queue lengths.
+`status` is `pending`, `done`, `skipped` or `failed` (with a `reason`). `signal` is there only with [signal identification](#signal-identification): `say` is `name` (`name` / `short` is the signal), `family` (`family_text` is it), `voice` or `nothing`; the other fields are the closest signal and family and how likely each is, whatever was said. `runs` (segments over a minute) holds each minute's call: `start_sec`, `windows`, `say`, `name` / `short` or `family_text`, and `p`. When identification could not run, `signal_note` says why. Segments under 2 s are skipped. Work still pending at shutdown is picked up again on the next start. `GET /api/analysis` reports what the host offers: whether each feature is enabled, the model, each one's state (`starting`, `downloading`, `ready`, `unavailable`, `failed`) and the queue lengths.
 
-Each recording (session) also gets a summary of all its segments — of the recording so far, while it is still running — under `analysis` in `GET /api/sessions` and in its `session_<uuid>.json` sidecar: voice / music / noise shares weighted by segment length, the overall label, every distinct sound heard with the number of segments it was among the strongest of, and how many segments are classified, transcribed, in progress, skipped or failed.
+Each recording (session) also gets a summary of all its segments — of the recording so far, while it is still running — under `analysis` in `GET /api/sessions` and in its `session_<uuid>.json` sidecar: voice / music / noise shares weighted by segment length, the overall label, every distinct sound heard with the number of segments it was among the strongest of, every signal identified (`signals`, with the number of segments), and how many segments are classified, transcribed, in progress, skipped or failed.
 
 ### In the web UI
 
 Results are shown to everyone — no login needed; only the settings require it:
 
 - **Each recording** has a summary at the top of its card: a voice / music / noise bar with percentages, the list of everything heard ("Speech 12", "Radio 12", "Music 3"…), progress counts, and a **Transcript** button that opens the whole recording's transcript, each passage stamped with the time of its segment. On a live recording it reads "so far" and updates as each segment is analysed.
-- **Each segment** shows its label with its share ("Voice 80%") and a strip of its 10-second windows coloured voice / music / noise; clicking the label opens what was heard and why, and **📝 Transcript** opens that segment's text.
+- **Each segment** shows its label with its share ("Voice 80%") and a strip of its 10-second windows coloured voice / music / noise, then the signal identified, if any ("FT8"; green when over 90% sure; dashed for a family such as "FSK"), and, fainter, any other signal one of its minutes named; the details list the call minute by minute; clicking the label opens what was heard and why, and **📝 Transcript** opens that segment's text.
 
 ---
 
@@ -315,6 +341,7 @@ All flags:
 | `-classify` | `true` | Offer classification to channels |
 | `-classify-model` | `mn10` | Classifier: `mn05`, `mn10`, `mn20` or `dsp` |
 | `-classify-threads` | `1` | CPU threads for the classifier |
+| `-identify` | `true` | Name the signal in classified segments (only with `-classify-model` `mn10` or `mn05`) |
 | `-transcribe` | `true` | Offer transcription to channels |
 | `-whisper-helper` | `whisper-helper` | Path to `whisper-helper` |
 | `-whisper-model` | `base` | `tiny`, `base` or `small` |
