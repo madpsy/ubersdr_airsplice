@@ -276,7 +276,7 @@ Orphaned WAV files (e.g. from a crash before the segment was closed) are automat
 
 ### Age-based cleanup
 
-Recordings older than the configured retention period are deleted automatically every 5 minutes. Retention can be set globally (default hours) or per channel, and is configurable live from the web UI without restart.
+Recordings older than the configured retention period are deleted automatically every 5 minutes. Retention can be set globally (default hours) or per channel, and is configurable live from the web UI without restart. A new channel's retention is chosen in the Add Channel form (**Keep 24 hours** unless changed) and can be changed later from its card.
 
 ### Quota-based cleanup
 

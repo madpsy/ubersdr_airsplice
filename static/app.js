@@ -320,6 +320,9 @@ function setChannelRetention(label, hours) {
   });
 }
 
+// A new channel keeps its recordings this long unless the form says otherwise.
+const NEW_CHANNEL_KEEP_HOURS = 24;
+
 function retentionOptionsHTML() {
   const opts = [
     [0,   'Keep forever'],
@@ -414,7 +417,7 @@ function classifyHostNote() {
   if (!c.enabled) return 'Turned off on this host (CLASSIFY=false)';
   const name = CLASSIFIER_NAMES[c.model] || c.model;
   switch (c.state) {
-    case 'idle':        return `Classifier: ${name} · loads when a channel uses it`;
+    case 'idle':        return `Classifier: ${name}${identifyHostNote()} · loads when a channel uses it`;
     case 'starting':    return `Loading ${name}…`;
     case 'downloading': return `Downloading ${name}… ${Math.round((c.progress || 0) * 100)}%`;
     case 'failed':      return `${name} unavailable, using DSP: ${c.error || 'failed'}`;
@@ -1177,7 +1180,7 @@ function renderChannels(channels) {
       <div class="ch-last-heard-wrap">${lastHeardHTML(ch.last_heard)}</div>
       <div class="ch-rec-tags-wrap">${recordingTagsHTML(ch.recording_analysis, ch.recording)}</div>
       <div class="ch-snr">SNR: ${fmtSNR(ch.snr)}</div>
-      <canvas class="ch-snr-chart" height="32" title="Rolling 10s SNR (30 dB=red → 60 dB=green)"></canvas>
+      <canvas class="ch-snr-chart" height="32" title="Rolling 10 s SNR, −5 to 30 dB (0 dB red → 15 dB green, as UberSDR)"></canvas>
       <div class="ch-actions">
         ${listenBtn}
         ${removeBtn}
@@ -1730,6 +1733,15 @@ document.getElementById('add-rec-mode').addEventListener('change', function () {
   }
 });
 
+// The add form's "Keep recordings" choice, back to its default.
+function resetAddKeep() {
+  const sel = document.getElementById('add-keep');
+  if (!sel) return;
+  if (!sel.options.length) sel.innerHTML = retentionOptionsHTML();
+  sel.value = String(NEW_CHANNEL_KEEP_HOURS);
+}
+resetAddKeep();
+
 function doAddChannel() {
   const nameRaw = document.getElementById('add-name').value.trim();
   const freqRaw = document.getElementById('add-freq').value.trim();
@@ -1755,6 +1767,8 @@ function doAddChannel() {
   const an = readAnalysisFields(document.getElementById('add-analysis-mount'));
   if (an) payload.analysis = an;
   if (bwHz > 0) payload.bandwidth_hz = bwHz;
+  const keepSel = document.getElementById('add-keep');
+  if (keepSel) payload.keep_hours = parseInt(keepSel.value, 10) || 0;
 
   if (recMode === 'smart') {
     const startThresh   = parseFloat(document.getElementById('add-sr-start-thresh').value);
@@ -1800,11 +1814,13 @@ function doAddChannel() {
     document.getElementById('add-name').value = '';
     document.getElementById('add-freq').value = '';
     document.getElementById('add-rec-mode').value = 'continuous';
+    resetAddKeep();
     document.getElementById('add-smart-fields').classList.add('hidden');
     const sf = document.getElementById('add-sched-fields');
     if (sf) sf.classList.add('hidden');
     errEl.classList.add('hidden');
     hideAddChannelForm();
+    loadRetention(); // the new card's Keep choice
     loadChannels();
     loadAnalysis(); // an opt-in may have started a model download
   }).catch(e => {
@@ -2952,8 +2968,9 @@ function drawSnrTimeline(canvas, points, startedAt, windowStartMs, windowEndMs) 
     const norm = (p.snr.avg_db - minSNR) / rangeSNR;
     const barH = pad + norm * (snrH - pad * 2);
     const y    = snrH - barH;
-    const hue  = norm * 120; // 0=red, 120=green
-    ctx.fillStyle = `hsl(${hue},80%,50%)`;
+    // Height is relative to this recording's range; colour is UberSDR's
+    // absolute scale, so 10 dB is the same colour on every recording.
+    ctx.fillStyle = snrColour(p.snr.avg_db);
     ctx.fillRect(Math.max(x, 0), y, barW, barH);
   });
 
@@ -3595,16 +3612,30 @@ function connectSSE() {
 // Updates the .ch-snr text and draws a rolling 10-second SNR chart on .ch-snr-chart.
 
 const SNR_HISTORY_LEN = 100;  // 100 samples × 100 ms = 10 s
-const SNR_MIN_DB      = 30;   // red
-const SNR_MAX_DB      = 60;   // green
+
+// UberSDR v2's SNR scales (static/v2/src/lib/format.js in ka9q_ubersdr), so a
+// signal reads the same colour here as on the receiver's own meter: its meter
+// spans -5 to 30 dB, and its colour ramps from red at 0 dB through yellow to
+// green at 15 dB.
+const SNR_MIN_DB        = -5;
+const SNR_MAX_DB        = 30;
+const SNR_COLOUR_MIN_DB = 0;
+const SNR_COLOUR_MAX_DB = 15;
 
 // Ring buffers: label → Float32Array of length SNR_HISTORY_LEN
 const snrHistory = {};
 
-function snrToHue(db) {
-  // Clamp to [SNR_MIN_DB, SNR_MAX_DB] then map to hue 0 (red) → 120 (green)
-  const norm = Math.max(0, Math.min(1, (db - SNR_MIN_DB) / (SNR_MAX_DB - SNR_MIN_DB)));
-  return norm * 120;
+// Hue for an SNR: 0 (red) at SNR_COLOUR_MIN_DB to 120 (green) at SNR_COLOUR_MAX_DB.
+function snrHue(db) {
+  if (db == null || !Number.isFinite(db)) return 0;
+  const c = Math.max(SNR_COLOUR_MIN_DB, Math.min(SNR_COLOUR_MAX_DB, db));
+  return Math.round(((c - SNR_COLOUR_MIN_DB) / (SNR_COLOUR_MAX_DB - SNR_COLOUR_MIN_DB)) * 120);
+}
+
+// UberSDR's snrColour; grey when there is no reading.
+function snrColour(db) {
+  if (db == null || !Number.isFinite(db)) return 'hsl(0, 0%, 55%)';
+  return `hsl(${snrHue(db)}, 90%, 55%)`;
 }
 
 function drawChannelSNRChart(canvas, buf, count) {
@@ -3636,13 +3667,13 @@ function drawChannelSNRChart(canvas, buf, count) {
     // x: spread across full width based on position in history
     const x = (i / (SNR_HISTORY_LEN - 1 || 1)) * W;
     const y = H - norm * (H - 2) - 1;
-    pts.push({ x, y, norm });
+    pts.push({ x, y, db });
   }
 
   if (pts.length < 2) {
     // Single point — draw a dot
     const p = pts[0];
-    ctx.fillStyle = `hsl(${p.norm * 120},85%,55%)`;
+    ctx.fillStyle = snrColour(p.db);
     ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
     return;
   }
@@ -3651,7 +3682,7 @@ function drawChannelSNRChart(canvas, buf, count) {
   // We draw the filled area first (semi-transparent), then the coloured line on top.
 
   // Filled area (use average colour for simplicity)
-  const avgNorm = pts.reduce((s, p) => s + p.norm, 0) / pts.length;
+  const avgDb = pts.reduce((s, p) => s + p.db, 0) / pts.length;
   ctx.beginPath();
   ctx.moveTo(pts[0].x, H);
   ctx.lineTo(pts[0].x, pts[0].y);
@@ -3660,16 +3691,15 @@ function drawChannelSNRChart(canvas, buf, count) {
   }
   ctx.lineTo(pts[pts.length - 1].x, H);
   ctx.closePath();
-  ctx.fillStyle = `hsla(${avgNorm * 120},80%,45%,0.25)`;
+  ctx.fillStyle = `hsla(${snrHue(avgDb)},90%,55%,0.25)`;
   ctx.fill();
 
   // Coloured line — draw segment by segment so each segment gets its own colour.
   ctx.lineWidth = 1.5;
   ctx.lineJoin = 'round';
   for (let i = 1; i < pts.length; i++) {
-    const norm = (pts[i - 1].norm + pts[i].norm) / 2;
     ctx.beginPath();
-    ctx.strokeStyle = `hsl(${norm * 120},90%,55%)`;
+    ctx.strokeStyle = snrColour((pts[i - 1].db + pts[i].db) / 2);
     ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
     ctx.lineTo(pts[i].x, pts[i].y);
     ctx.stroke();

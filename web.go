@@ -445,6 +445,7 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				Schedule    ScheduleConfig    `json:"schedule"`     // optional time-based schedule
 				BandwidthHz int               `json:"bandwidth_hz"` // optional filter bandwidth
 				Analysis    AnalysisConfig    `json:"analysis"`     // optional classification / transcription opt-in
+				KeepHours   *int              `json:"keep_hours"`   // optional retention; 0 = the host default
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "invalid body", http.StatusBadRequest)
@@ -468,6 +469,10 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 				http.Error(w, fmt.Sprintf(`{"error":"analysis: %s"}`, errMsg), http.StatusBadRequest)
 				return
 			}
+			if body.KeepHours != nil && *body.KeepHours < 0 {
+				http.Error(w, `{"error":"keep_hours must be >= 0"}`, http.StatusBadRequest)
+				return
+			}
 			ch, err := mgr.add(body.FreqHz, body.Mode, body.Name, "", body.SmartRecord, body.Schedule, body.BandwidthHz, body.Analysis)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusConflict)
@@ -475,6 +480,11 @@ func startHTTPServer(addr string, store *recordingStore, hub *sseHub, mgr *chann
 			}
 			az.use(body.Analysis)
 			mgr.save()
+			if body.KeepHours != nil {
+				rc.setForLabel(ch.label, *body.KeepHours)
+				rc.save(retentionCfgPath)
+				log.Printf("[retention] %s: keep_hours=%d", ch.label, *body.KeepHours)
+			}
 			hub.broadcast(sseEvent{
 				Event: "channel_added",
 				Data:  map[string]interface{}{"label": ch.label, "freq_hz": body.FreqHz, "mode": body.Mode},
